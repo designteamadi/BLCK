@@ -1,0 +1,17 @@
+{
+  "name": "blck-studio",
+  "version": "3.0.0",
+  "description": "Industrialized design system — Gemini AI, PSD parsing, brand kits, real-time collaboration, cloud sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel deploy --prod"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@vercel/postgres": "^0.10.0"
+  }
+}
