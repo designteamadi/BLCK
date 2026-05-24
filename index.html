@@ -2533,7 +2533,12 @@ const App = (function(){
     if (mode === 'edit' && !promptText.trim()) {
       toast('Describe what to change', 'err'); return;
     }
-    toast(mode === 'remove-bg' ? 'Removing background with Nano Banana Pro...' : 'Editing with Nano Banana Pro...', '', 'GEMINI.PROC');
+    // Background removal is handled by removeBackgroundOfSelected() using
+    // RMBG-1.4 in the browser, not Gemini. This function only handles edit/stylize/upscale.
+    if (mode === 'remove-bg') {
+      return removeBackgroundOfSelected();
+    }
+    toast('Editing with Nano Banana Pro...', '', 'GEMINI.PROC');
     try {
       const r = await safeApi('/api/edit', {
         method: 'POST',
@@ -2697,60 +2702,88 @@ const App = (function(){
   }
 
   // ============================================================
-  // BACKGROUND REMOVAL (client-side AI)
+  // BACKGROUND REMOVAL (client-side AI, RMBG-1.4)
   // ============================================================
   // Uses RMBG-1.4 from BRIA AI via @huggingface/transformers, loaded from CDN.
-  // Runs entirely in the user's browser via WebAssembly (or WebGPU when
-  // available). First call downloads the model (~45MB, cached forever after).
+  // Runs entirely in the user's browser via WebGPU (when available) or WebAssembly.
+  // First call downloads the model (~176MB, cached forever after).
   // Quality is SOTA — matches commercial services like remove.bg.
   //
-  // Why not Gemini for this? Gemini image editing can't produce true
-  // alpha-channel cutouts reliably. RMBG is a purpose-built segmentation
-  // model and handles edges, hair, fine detail much better.
+  // Why not the pipeline() API? RMBG-1.4 is a SegformerForSemanticSegmentation
+  // model that requires custom config on transformers.js. The AutoModel +
+  // AutoProcessor pattern with explicit config is the proven-working approach.
 
-  let bgRemovalPipeline = null;     // cached pipeline instance
-  let bgRemovalLoading = null;      // promise during initial download
+  const RMBG = {
+    model: null,
+    processor: null,
+    AutoModel: null,
+    AutoProcessor: null,
+    RawImage: null,
+    device: null,
+    loading: null,
+  };
 
-  async function loadBgRemovalPipeline(onProgress) {
-    if (bgRemovalPipeline) return bgRemovalPipeline;
-    if (bgRemovalLoading) return bgRemovalLoading;
+  async function loadBgRemovalModel(onProgress) {
+    if (RMBG.model && RMBG.processor) return;
+    if (RMBG.loading) return RMBG.loading;
 
-    bgRemovalLoading = (async () => {
+    RMBG.loading = (async () => {
       const transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2/+esm');
-      // Use WebGPU if available, fallback to WASM. RMBG-1.4 works in both.
+      RMBG.AutoModel = transformers.AutoModel;
+      RMBG.AutoProcessor = transformers.AutoProcessor;
+      RMBG.RawImage = transformers.RawImage;
+
+      // Allow remote models from huggingface
+      transformers.env.allowLocalModels = false;
+      transformers.env.allowRemoteModels = true;
+      transformers.env.backends.onnx.wasm.proxy = true;
+
+      // Detect WebGPU
       let device = 'wasm';
       try {
         if (navigator.gpu) {
           const adapter = await navigator.gpu.requestAdapter();
           if (adapter) device = 'webgpu';
         }
-      } catch (e) { /* WebGPU not available */ }
+      } catch (e) { /* no WebGPU */ }
+      RMBG.device = device;
 
-      // Allow remote models from huggingface
-      transformers.env.allowLocalModels = false;
-      transformers.env.allowRemoteModels = true;
+      const modelId = 'briaai/RMBG-1.4';
 
-      const pipe = await transformers.pipeline(
-        'image-segmentation',
-        'briaai/RMBG-1.4',
-        {
-          device,
-          progress_callback: (info) => {
-            if (onProgress && info.status === 'progress' && info.file) {
-              const pct = info.total ? Math.round((info.loaded / info.total) * 100) : 0;
-              onProgress({ file: info.file, percent: pct, status: info.status });
-            }
-          },
-        }
-      );
-      bgRemovalPipeline = pipe;
-      bgRemovalPipeline._device = device;
-      return pipe;
+      // Load model — custom config because RMBG doesn't ship a transformers.js-friendly config.json
+      RMBG.model = await RMBG.AutoModel.from_pretrained(modelId, {
+        config: { model_type: 'custom' },
+        dtype: device === 'webgpu' ? 'fp16' : 'fp32',
+        device,
+        progress_callback: (info) => {
+          if (onProgress && info.status === 'progress' && info.file && info.total) {
+            const pct = Math.round((info.loaded / info.total) * 100);
+            onProgress({ file: info.file, percent: pct });
+          }
+        },
+      });
+
+      // Load processor — explicit config required for RMBG-1.4
+      RMBG.processor = await RMBG.AutoProcessor.from_pretrained(modelId, {
+        config: {
+          do_normalize: true,
+          do_pad: false,
+          do_rescale: true,
+          do_resize: true,
+          image_mean: [0.5, 0.5, 0.5],
+          feature_extractor_type: 'ImageFeatureExtractor',
+          image_std: [1, 1, 1],
+          resample: 2,
+          rescale_factor: 0.00392156862745098,
+          size: { width: 1024, height: 1024 },
+        },
+      });
     })();
+
     try {
-      return await bgRemovalLoading;
+      await RMBG.loading;
     } finally {
-      bgRemovalLoading = null;
+      RMBG.loading = null;
     }
   }
 
@@ -2759,12 +2792,12 @@ const App = (function(){
     if (sel.length !== 1 || sel[0].type !== 'image') { toast('Select one image', 'err'); return; }
     const el = sel[0];
 
-    // Show a progress UI for first-time model download
+    // Progress UI
     let progressEl = null;
     function showProgress(msg) {
       if (!progressEl) {
         progressEl = document.createElement('div');
-        progressEl.style.cssText = 'position:fixed;top:60px;right:20px;z-index:9999;background:var(--ink-2);border:1px solid var(--signal);padding:14px 18px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:var(--text);min-width:240px';
+        progressEl.style.cssText = 'position:fixed;top:60px;right:20px;z-index:9999;background:var(--ink-2);border:1px solid var(--signal);padding:14px 18px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:var(--text);min-width:260px;line-height:1.5';
         document.body.appendChild(progressEl);
       }
       progressEl.innerHTML = msg;
@@ -2772,69 +2805,49 @@ const App = (function(){
     function hideProgress() { if (progressEl) { progressEl.remove(); progressEl = null; } }
 
     try {
-      // Load the pipeline (downloads model on first call)
-      if (!bgRemovalPipeline) {
-        showProgress('LOADING MODEL · FIRST TIME ONLY<br><span style="color:var(--text-3);font-size:9px">~45MB · cached forever after</span>');
+      if (!RMBG.model) {
+        showProgress('LOADING RMBG-1.4<br><span style="color:var(--text-3);font-size:9px">~176MB · first time only · cached forever</span>');
       }
-      const pipe = await loadBgRemovalPipeline((info) => {
-        if (info.status === 'progress') {
-          showProgress(`DOWNLOADING<br><span style="color:var(--text-3);font-size:9px">${info.file.slice(0, 36)}<br>${info.percent}%</span>`);
-        }
+
+      await loadBgRemovalModel((info) => {
+        showProgress(`DOWNLOADING MODEL<br><span style="color:var(--text-3);font-size:9px">${(info.file||'').slice(-40)}<br>${info.percent}%</span>`);
       });
 
-      showProgress('REMOVING BACKGROUND<br><span style="color:var(--text-3);font-size:9px">Device: ' + (bgRemovalPipeline._device || 'wasm') + '</span>');
+      showProgress(`REMOVING BACKGROUND<br><span style="color:var(--text-3);font-size:9px">Device: ${RMBG.device}</span>`);
 
-      // The pipeline expects a URL or data URL. Pre-load the image to ensure CORS works.
+      // Load image (cross-origin safe via existing helper)
       const img = await loadImage(el.src);
+
+      // Convert to RawImage for the processor
       const canvas = document.createElement('canvas');
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0);
-      const inputDataUrl = canvas.toDataURL('image/png');
+      const dataUrl = canvas.toDataURL('image/png');
+      const rawImage = await RMBG.RawImage.fromURL(dataUrl);
 
-      // Run segmentation. Output is a mask where label 'background' has values 0..255.
-      const output = await pipe(inputDataUrl);
-      // The pipeline returns either [{mask, label, score}, ...] or a single object;
-      // RMBG returns one segment representing the FOREGROUND, with a mask we composite.
-      const segment = Array.isArray(output) ? output[0] : output;
-      if (!segment || !segment.mask) {
-        throw new Error('Model returned no mask');
-      }
+      // Preprocess
+      const { pixel_values } = await RMBG.processor(rawImage);
 
-      // Composite: apply mask to alpha channel of the original image
+      // Run model
+      const { output } = await RMBG.model({ input: pixel_values });
+
+      // Output is a tensor [1, 1, 1024, 1024] with values 0..1 (foreground mask)
+      // Resize back to original image dimensions
+      const maskRaw = await RMBG.RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(canvas.width, canvas.height);
+
+      // Apply mask to alpha channel
       const result = document.createElement('canvas');
-      result.width = img.naturalWidth;
-      result.height = img.naturalHeight;
+      result.width = canvas.width;
+      result.height = canvas.height;
       const rctx = result.getContext('2d');
       rctx.drawImage(img, 0, 0);
       const imgData = rctx.getImageData(0, 0, result.width, result.height);
-      const mask = segment.mask;
-      // Mask is a RawImage with .data (Uint8Array) and .width/.height
-      // If mask size doesn't match (it usually does), we scale via canvas
-      let maskData = mask.data;
-      if (mask.width !== result.width || mask.height !== result.height) {
-        // Upscale mask to image size via canvas
-        const mc = document.createElement('canvas');
-        mc.width = mask.width; mc.height = mask.height;
-        const mctx = mc.getContext('2d');
-        const md = mctx.createImageData(mask.width, mask.height);
-        for (let i = 0; i < mask.data.length; i++) {
-          md.data[i*4] = md.data[i*4+1] = md.data[i*4+2] = mask.data[i];
-          md.data[i*4+3] = 255;
-        }
-        mctx.putImageData(md, 0, 0);
-        const rc = document.createElement('canvas');
-        rc.width = result.width; rc.height = result.height;
-        const rctx2 = rc.getContext('2d');
-        rctx2.drawImage(mc, 0, 0, result.width, result.height);
-        const rd = rctx2.getImageData(0, 0, result.width, result.height);
-        maskData = new Uint8Array(result.width * result.height);
-        for (let i = 0; i < maskData.length; i++) maskData[i] = rd.data[i*4];
-      }
-      // Apply: maskData[i] is the alpha (0=background, 255=foreground)
-      for (let i = 0; i < maskData.length; i++) {
-        imgData.data[i*4 + 3] = maskData[i];
+      // maskRaw.data is a Uint8Array of length width*height (single channel)
+      const md = maskRaw.data;
+      for (let i = 0; i < md.length; i++) {
+        imgData.data[i * 4 + 3] = md[i];   // set alpha from mask
       }
       rctx.putImageData(imgData, 0, 0);
 
@@ -2843,7 +2856,7 @@ const App = (function(){
       if (ab && ab.isMaster) syncFromMaster();
       pushHistory(); renderAll();
       hideProgress();
-      toast('Background removed (RMBG-1.4 · ' + (bgRemovalPipeline._device || 'wasm') + ')', 'ok', 'BG.DONE');
+      toast(`Background removed (RMBG · ${RMBG.device})`, 'ok', 'BG.DONE');
     } catch (err) {
       hideProgress();
       console.error('[bgRemove]', err);
