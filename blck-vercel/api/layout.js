@@ -2,41 +2,13 @@
  * POST /api/layout
  *
  * Adapts a design from a master artboard to a new aspect ratio using Gemini.
- * Returns new x/y/w/h (and fontSize for text) for each element so the layout
- * looks intentional in the new ratio rather than just proportionally squished.
+ * Returns new x/y/w/h (and fontSize for text) for each element.
  *
- * Body:
- *   {
- *     master: {
- *       width:  number,
- *       height: number,
- *       elements: [
- *         {
- *           id: string,
- *           type: 'text' | 'image' | 'shape' | 'path',
- *           role?: 'logo' | 'headline' | 'subheadline' | 'cta' | 'picture' | 'background',
- *           x, y, w, h: number,
- *           text?: string,          // for text elements
- *           fontSize?: number,
- *           shape?: string,         // for shape elements: 'rect', 'circle', etc.
- *           name?: string,
- *         }
- *       ]
- *     },
- *     target: { width: number, height: number, name?: string }
- *   }
- *
- * Response:
- *   {
- *     ok: true,
- *     elements: [
- *       { id, x, y, w, h, fontSize?, notes? }
- *     ],
- *     rationale?: string
- *   }
+ * Uses gemini-2.5-flash (text-only model with structured JSON output).
+ * NOTE: gemini-2.0-flash shuts down June 1, 2026 — do not use.
  */
 
-const MODEL = 'gemini-2.0-flash';
+const MODEL = 'gemini-2.5-flash';
 const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
 const RESPONSE_SCHEMA = {
@@ -74,7 +46,10 @@ export default async function handler(req, res) {
   }
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ ok: false, error: 'Server missing GEMINI_API_KEY' });
+    return res.status(500).json({
+      ok: false,
+      error: 'GEMINI_API_KEY is not set on this Vercel deployment.',
+    });
   }
 
   try {
@@ -89,25 +64,18 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'width and height must be positive' });
     }
     if (master.elements.length === 0) {
-      // No elements to lay out — just echo back
-      return res.status(200).json({ ok: true, elements: [], rationale: 'Empty master — nothing to adapt.' });
+      return res.status(200).json({ ok: true, elements: [], rationale: 'Empty master.' });
     }
     if (master.elements.length > 60) {
       return res.status(400).json({ ok: false, error: 'Too many elements (max 60). Group small assets before resizing.' });
     }
 
-    // Slim the input — Gemini only needs the structural fields, not full base64 images
     const slimElements = master.elements.map(el => ({
       id: el.id,
       type: el.type,
       role: el.role || inferRole(el),
       x: round(el.x), y: round(el.y), w: round(el.w), h: round(el.h),
-      ...(el.type === 'text'
-        ? {
-            text: clip(el.text || '', 140),
-            fontSize: round(el.fontSize || 24),
-          }
-        : {}),
+      ...(el.type === 'text' ? { text: clip(el.text || '', 140), fontSize: round(el.fontSize || 24) } : {}),
       ...(el.type === 'shape' ? { shape: el.shape } : {}),
       ...(el.name ? { name: clip(el.name, 40) } : {}),
     }));
@@ -120,9 +88,7 @@ export default async function handler(req, res) {
       : target.width === target.height ? 'square'
       : 'similar';
 
-    const prompt = buildPrompt({
-      master, target, slimElements, masterAspect, targetAspect, aspectChange,
-    });
+    const prompt = buildPrompt({ master, target, slimElements, masterAspect, targetAspect, aspectChange });
 
     const payload = {
       contents: [{ parts: [{ text: prompt }] }],
@@ -142,35 +108,44 @@ export default async function handler(req, res) {
 
     if (!upstream.ok) {
       const errText = await upstream.text();
-      console.error('Gemini layout error:', upstream.status, errText);
+      console.error('[layout] Gemini error', upstream.status, errText);
+      const msg = extractErrorMessage(errText) || `Gemini API ${upstream.status}`;
       return res.status(upstream.status).json({
         ok: false,
-        error: extractErrorMessage(errText) || `Gemini API error (${upstream.status})`,
+        error: msg,
+        upstreamStatus: upstream.status,
       });
     }
 
     const data = await upstream.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
-      return res.status(502).json({ ok: false, error: 'No response from model' });
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      console.error('[layout] No text response', { finishReason });
+      return res.status(502).json({
+        ok: false,
+        error: 'Model returned no response. finishReason=' + (finishReason || 'unknown'),
+      });
     }
 
     let parsed;
     try { parsed = JSON.parse(text); }
-    catch (e) { return res.status(502).json({ ok: false, error: 'Model returned invalid JSON' }); }
-
-    if (!Array.isArray(parsed.elements)) {
-      return res.status(502).json({ ok: false, error: 'Invalid layout response' });
+    catch (e) {
+      console.error('[layout] JSON parse fail:', text.slice(0, 400));
+      return res.status(502).json({ ok: false, error: 'Model returned invalid JSON' });
     }
 
-    // Validate + clamp results to the target bounds.
+    if (!Array.isArray(parsed.elements)) {
+      return res.status(502).json({ ok: false, error: 'Invalid layout response shape' });
+    }
+
     const idSet = new Set(master.elements.map(e => e.id));
     const seen = new Set();
     const clean = [];
     for (const el of parsed.elements) {
       if (!el || typeof el.id !== 'string') continue;
-      if (!idSet.has(el.id)) continue;     // unknown id
-      if (seen.has(el.id)) continue;        // dupe
+      if (!idSet.has(el.id)) continue;
+      if (seen.has(el.id)) continue;
       seen.add(el.id);
       const x = clamp(num(el.x, 0), -target.width, target.width * 2);
       const y = clamp(num(el.y, 0), -target.height, target.height * 2);
@@ -189,7 +164,7 @@ export default async function handler(req, res) {
       rationale: typeof parsed.rationale === 'string' ? parsed.rationale.slice(0, 600) : undefined,
     });
   } catch (err) {
-    console.error('Layout handler error:', err);
+    console.error('[layout] Handler crash:', err);
     return res.status(500).json({ ok: false, error: err.message || 'Internal error' });
   }
 }
@@ -198,29 +173,29 @@ function buildPrompt({ master, target, slimElements, masterAspect, targetAspect,
   return `You are a senior visual designer adapting a design from one aspect ratio to another. The goal is a layout that feels intentional in the NEW format, not just a proportional squish.
 
 MASTER ARTBOARD (the design as it exists today):
-- Canvas: ${master.width} × ${master.height} (aspect ${masterAspect})
+- Canvas: ${master.width} x ${master.height} (aspect ${masterAspect})
 - Elements (top-left origin, pixels):
 ${JSON.stringify(slimElements, null, 2)}
 
 NEW ARTBOARD (lay out for this):
-- Canvas: ${target.width} × ${target.height} (aspect ${targetAspect})
+- Canvas: ${target.width} x ${target.height} (aspect ${targetAspect})
 - Format change: ${aspectChange}
 - Name: ${target.name || 'Artboard'}
 
 YOUR JOB:
 Return new x, y, w, h for EVERY element (using the same ids). For text elements, also return a sensible fontSize. The new layout must:
 
-1. **Preserve hierarchy.** Logo small and in a corner. Headline large and prominent. Subheadline below headline. CTA visible and tappable. Picture/background fills or anchors the composition.
-2. **Use the new canvas well.** Do not waste space. Do not leave huge empty regions unless the original was deliberately spacious.
-3. **Respect safe margins.** Keep at least 4–6% of canvas size as padding from the edges for primary content (logos, text, CTAs). Backgrounds may bleed edge-to-edge.
-4. **Backgrounds first.** Any element with role 'background' or that covered the full master canvas should be resized to fill the new canvas (x:0, y:0, w:target.width, h:target.height).
-5. **Adapt for orientation.** Going wide → portrait: stack elements vertically, increase text size if there's room, keep photos as hero blocks. Portrait → wide: arrange elements side-by-side, keep text columns narrow.
-6. **Keep text readable.** Min font-size 12px. Don't shrink headlines below 60% of the master's headline font size unless absolutely necessary.
-7. **Don't overlap interactive content.** CTAs and headlines must not overlap each other.
-8. **Stay in bounds.** All x in [0, target.width - w] and y in [0, target.height - h] for primary content. (Backgrounds may go edge-to-edge.)
-9. **Output every element by id.** Don't skip any. Don't invent new ids.
+1. Preserve hierarchy. Logo small and in a corner. Headline large and prominent. Subheadline below headline. CTA visible and tappable. Picture/background fills or anchors the composition.
+2. Use the new canvas well. Do not waste space. Do not leave huge empty regions unless the original was deliberately spacious.
+3. Respect safe margins. Keep at least 4-6% of canvas size as padding from the edges for primary content (logos, text, CTAs). Backgrounds may bleed edge-to-edge.
+4. Backgrounds first. Any element with role 'background' or that covered the full master canvas should be resized to fill the new canvas (x:0, y:0, w:target.width, h:target.height).
+5. Adapt for orientation. Going wide to portrait: stack elements vertically, increase text size if there's room, keep photos as hero blocks. Portrait to wide: arrange elements side-by-side, keep text columns narrow.
+6. Keep text readable. Min font-size 12px. Don't shrink headlines below 60% of the master's headline font size unless absolutely necessary.
+7. Don't overlap interactive content. CTAs and headlines must not overlap each other.
+8. Stay in bounds. All x in [0, target.width - w] and y in [0, target.height - h] for primary content. (Backgrounds may go edge-to-edge.)
+9. Output every element by id. Don't skip any. Don't invent new ids.
 
-Return the JSON object directly — no markdown fences, no commentary outside the schema.`;
+Return the JSON object directly - no markdown fences, no commentary outside the schema.`;
 }
 
 function inferRole(el) {
