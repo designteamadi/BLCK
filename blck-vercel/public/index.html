@@ -734,7 +734,7 @@
   </div>
 
   <div class="footer-note">
-    BLCK.STUDIO &nbsp;©&nbsp;2026 &nbsp;—&nbsp; <span class="signal">INDUSTRIALIZED DESIGN, DIGITAL CONTROL</span> &nbsp;—&nbsp; ALL OUTPUTS GENERATED CLIENT-SIDE
+    BLCK.STUDIO &nbsp;©&nbsp;2026 &nbsp;—&nbsp; <span class="signal">INDUSTRIALIZED DESIGN, DIGITAL CONTROL</span> &nbsp;—&nbsp; <a href="/api/diag" target="_blank" style="color:inherit;text-decoration:underline;text-decoration-color:var(--text-3)">DIAGNOSTICS</a>
   </div>
 </div>
 
@@ -1803,6 +1803,8 @@ const App = (function(){
       if (ab.isMaster) return;
       ab.elements = master.elements.map(el => {
         const cloned = JSON.parse(JSON.stringify(el));
+        cloned.id = uid();
+        cloned._fromMaster = el.id;   // preserve hint so "Redesign with AI" still works
         const fit = fitElementToArtboard(el, master.width, master.height, ab.width, ab.height);
         cloned.x = fit.x; cloned.y = fit.y;
         cloned.w = fit.w; cloned.h = fit.h;
@@ -1962,9 +1964,22 @@ const App = (function(){
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const json = await resp.json();
+      let json;
+      try { json = await resp.json(); }
+      catch (e) {
+        const text = await resp.text().catch(()=>'');
+        console.error('[smartLayout] Non-JSON response', resp.status, text.slice(0,300));
+        if (opts.announce) toast(`Smart layout error ${resp.status} — kept proportional fit`, 'err', 'LAYOUT.ERR');
+        return false;
+      }
       if (!json.ok) {
-        if (opts.announce) toast('Smart layout unavailable — using proportional fit', '', 'LAYOUT.SKIP');
+        const detail = json.error || 'unknown';
+        console.warn('[smartLayout] /api/layout failed:', json);
+        if (opts.announce) {
+          // Surface the specific error so the user knows what to fix
+          const short = detail.length > 80 ? detail.slice(0, 77) + '…' : detail;
+          toast('Smart layout: ' + short, 'err', 'LAYOUT.SKIP');
+        }
         return false;
       }
 
@@ -1990,7 +2005,8 @@ const App = (function(){
       }
       return true;
     } catch (err) {
-      if (opts.announce) toast('Smart layout error — keeping proportional fit', 'err', 'LAYOUT.ERR');
+      console.error('[smartLayout] Exception:', err);
+      if (opts.announce) toast('Smart layout error: ' + (err.message || 'network'), 'err', 'LAYOUT.ERR');
       return false;
     } finally {
       indicator.remove();
@@ -2242,21 +2258,45 @@ const App = (function(){
     } else if (activeLeftPanel === 'ai') {
       c.innerHTML = `
         <div class="panel-section">
-          <div class="panel-section-title"><span>Generate asset</span><span class="num">GEMINI / NANO BANANA</span></div>
+          <div class="panel-section-title"><span>Generate asset</span><span class="num">GEMINI / NANO BANANA 2</span></div>
           <textarea class="ai-prompt" id="ai-prompt" placeholder="e.g. a gold metallic 3D star burst with sparkles, studio lighting"></textarea>
           <div class="prop-row" style="margin-top:10px">
             <label>Ratio</label>
             <select id="ai-aspect">
-              <option value="1:1" selected>Square 1:1</option>
-              <option value="9:16">Vertical 9:16</option>
-              <option value="16:9">Wide 16:9</option>
-              <option value="4:5">Portrait 4:5</option>
-              <option value="3:4">Portrait 3:4</option>
-              <option value="3:2">Photo 3:2</option>
-              <option value="2:3">Photo 2:3</option>
-              <option value="4:3">Classic 4:3</option>
-              <option value="5:4">Print 5:4</option>
-              <option value="21:9">Cinema 21:9</option>
+              <optgroup label="Standard">
+                <option value="1:1" selected>Square 1:1</option>
+                <option value="9:16">Vertical 9:16</option>
+                <option value="16:9">Wide 16:9</option>
+                <option value="4:5">Portrait 4:5</option>
+                <option value="3:4">Portrait 3:4</option>
+                <option value="3:2">Photo 3:2</option>
+                <option value="2:3">Photo 2:3</option>
+                <option value="4:3">Classic 4:3</option>
+                <option value="5:4">Print 5:4</option>
+                <option value="21:9">Cinema 21:9</option>
+              </optgroup>
+              <optgroup label="Extreme (Nano Banana 2)">
+                <option value="1:4">Tall banner 1:4</option>
+                <option value="4:1">Wide banner 4:1</option>
+                <option value="1:8">Ultra-tall 1:8</option>
+                <option value="8:1">Ultra-wide 8:1</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="prop-row" style="margin-top:6px">
+            <label>Quality</label>
+            <select id="ai-size">
+              <option value="512">512 · ultra-fast</option>
+              <option value="1K" selected>1K · standard ($0.067)</option>
+              <option value="2K">2K · high ($0.067)</option>
+              <option value="4K">4K · max ($0.12)</option>
+            </select>
+          </div>
+          <div class="prop-row" style="margin-top:6px">
+            <label>Thinking</label>
+            <select id="ai-thinking">
+              <option value="minimal" selected>Minimal · faster</option>
+              <option value="high">High · better quality</option>
             </select>
           </div>
           <div class="prop-row" style="margin-top:6px">
@@ -2267,10 +2307,10 @@ const App = (function(){
             </div>
           </div>
           <button class="btn btn-primary btn-block btn-sm" style="margin-top:10px" id="btn-ai-gen">
-            ${ic('wand-magic-sparkles')} Generate with Gemini
+            ${ic('wand-magic-sparkles')} Generate with Nano Banana 2
           </button>
           <div style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);letter-spacing:0.1em;text-transform:uppercase;margin-top:8px;line-height:1.6">
-            Powered by Gemini 2.5 Flash Image
+            Powered by Gemini 3.1 Flash Image · SynthID watermarked
           </div>
         </div>
         <div class="panel-section">
@@ -2284,7 +2324,7 @@ const App = (function(){
           <div class="panel-section-title"><span>Edit selected image</span><span class="num">IMG → IMG</span></div>
           <textarea class="ai-prompt" id="ai-edit-prompt" placeholder="e.g. make it more vibrant; add dramatic lighting; convert to watercolor" style="min-height:48px"></textarea>
           <button class="btn btn-block btn-sm" style="margin-top:8px" id="btn-ai-edit">
-            ${ic('pen-to-square')} Edit with Gemini
+            ${ic('pen-to-square')} Edit with Nano Banana 2
           </button>
           <button class="btn btn-block btn-sm" style="margin-top:6px" id="btn-ai-remove-bg">
             ${ic('eraser')} Remove background (AI)
@@ -2298,9 +2338,22 @@ const App = (function(){
           $$('[data-ai-mode]', c).forEach(x => x.classList.toggle('active', x===b));
         };
       });
-      $('#btn-ai-gen').onclick = () => generateAIElement($('#ai-prompt').value, $('#ai-aspect').value, aiMode);
+      $('#btn-ai-gen').onclick = () => generateAIElement($('#ai-prompt').value, {
+        aspectRatio: $('#ai-aspect').value,
+        imageSize: $('#ai-size')?.value || '1K',
+        thinkingLevel: $('#ai-thinking')?.value || 'minimal',
+        mode: aiMode,
+      });
       $$('[data-ai-quick]', c).forEach(b => {
-        b.onclick = () => { $('#ai-prompt').value = b.dataset.aiQuick; generateAIElement(b.dataset.aiQuick, $('#ai-aspect').value, aiMode); };
+        b.onclick = () => {
+          $('#ai-prompt').value = b.dataset.aiQuick;
+          generateAIElement(b.dataset.aiQuick, {
+            aspectRatio: $('#ai-aspect').value,
+            imageSize: $('#ai-size')?.value || '1K',
+            thinkingLevel: $('#ai-thinking')?.value || 'minimal',
+            mode: aiMode,
+          });
+        };
       });
       $('#btn-ai-edit').onclick = () => geminiEditSelected($('#ai-edit-prompt').value, 'edit');
       $('#btn-ai-remove-bg').onclick = () => geminiEditSelected('', 'remove-bg');
@@ -2343,21 +2396,33 @@ const App = (function(){
     }
   }
 
-  async function generateAIElement(promptText, aspectRatio, mode) {
+  async function generateAIElement(promptText, optsOrAspect, modeArg) {
     promptText = (promptText || '').trim();
     if (!promptText) { toast('Enter a description', 'err'); return; }
-    aspectRatio = aspectRatio || '1:1';
-    mode = mode || 'transparent';
+
+    // Accept either (prompt, opts) or legacy (prompt, aspectRatio, mode)
+    let aspectRatio, imageSize, thinkingLevel, mode;
+    if (optsOrAspect && typeof optsOrAspect === 'object') {
+      aspectRatio = optsOrAspect.aspectRatio || '1:1';
+      imageSize = optsOrAspect.imageSize || '1K';
+      thinkingLevel = optsOrAspect.thinkingLevel || 'minimal';
+      mode = optsOrAspect.mode || 'transparent';
+    } else {
+      aspectRatio = optsOrAspect || '1:1';
+      imageSize = '1K';
+      thinkingLevel = 'minimal';
+      mode = modeArg || 'transparent';
+    }
     const transparent = mode === 'transparent';
 
     const results = $('#ai-results');
-    results.innerHTML = '<div class="ai-result" style="grid-column:1/-1;aspect-ratio:auto;padding:18px"><div class="spinner"></div><div style="margin-left:12px;font-family:var(--font-mono);font-size:9px;letter-spacing:0.12em;color:var(--text-2)">GEMINI · GENERATING</div></div>';
+    results.innerHTML = '<div class="ai-result" style="grid-column:1/-1;aspect-ratio:auto;padding:18px"><div class="spinner"></div><div style="margin-left:12px;font-family:var(--font-mono);font-size:9px;letter-spacing:0.12em;color:var(--text-2)">NANO BANANA 2 · GENERATING</div></div>';
 
     try {
       const resp = await fetch('/api/generate', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({prompt: promptText, aspectRatio, transparent})
+        body: JSON.stringify({prompt: promptText, aspectRatio, imageSize, thinkingLevel, transparent})
       });
       const json = await resp.json();
       if (!json.ok) { throw new Error(json.error || 'Generation failed'); }
@@ -2389,6 +2454,7 @@ const App = (function(){
       results.parentElement.appendChild(hint);
       setTimeout(()=>hint.remove(), 5000);
     } catch(err) {
+      console.error('[generateAIElement]', err);
       results.innerHTML = '';
       const fb = document.createElement('div');
       fb.className = 'ai-result';
@@ -2398,9 +2464,14 @@ const App = (function(){
       fb.style.color = 'var(--danger)';
       fb.style.fontFamily = 'var(--font-mono)';
       fb.style.fontSize = '10px';
-      fb.style.letterSpacing = '0.1em';
-      fb.style.textTransform = 'uppercase';
-      fb.textContent = 'Gemini error — ' + (err.message || 'unknown');
+      fb.style.letterSpacing = '0.08em';
+      fb.style.lineHeight = '1.6';
+      fb.style.textTransform = 'none';
+      fb.innerHTML = `
+        <div style="font-weight:600;text-transform:uppercase;margin-bottom:6px">Gemini error</div>
+        <div style="color:var(--text-2)">${escapeHtml(err.message || 'unknown')}</div>
+        <div style="margin-top:10px"><a href="/api/diag" target="_blank" style="color:var(--signal);text-decoration:underline">Open /api/diag to check config &rarr;</a></div>
+      `;
       results.appendChild(fb);
       toast(err.message || 'Generation failed', 'err', 'GEMINI.ERR');
     }
@@ -2415,7 +2486,7 @@ const App = (function(){
     if (mode === 'edit' && !promptText.trim()) {
       toast('Describe what to change', 'err'); return;
     }
-    toast(mode === 'remove-bg' ? 'Removing background with Gemini...' : 'Editing with Gemini...', '', 'GEMINI.PROC');
+    toast(mode === 'remove-bg' ? 'Removing background with Nano Banana 2...' : 'Editing with Nano Banana 2...', '', 'GEMINI.PROC');
     try {
       const resp = await fetch('/api/edit', {
         method: 'POST',
@@ -2526,8 +2597,9 @@ const App = (function(){
 
       status.textContent = `${photos.length} OF ${json.total.toLocaleString()} RESULTS`;
     } catch (err) {
+      console.error('[searchStockPhotos]', err);
       results.innerHTML = '';
-      status.innerHTML = `<div style="color:var(--danger);text-transform:none;letter-spacing:0">Network error</div>`;
+      status.innerHTML = `<div style="color:var(--danger);text-transform:none;letter-spacing:0">Network error: ${escapeHtml(err.message || 'unknown')}. <a href="/api/diag" target="_blank" style="color:var(--signal)">Check config</a></div>`;
     }
   }
 
@@ -2583,7 +2655,7 @@ const App = (function(){
     const el = sel[0];
 
     // Try Gemini first (higher quality), fall back to local chroma-key if offline / no API key
-    toast('Removing background with Gemini...','','BG.PROC');
+    toast('Removing background with Nano Banana 2...','','BG.PROC');
     try {
       const resp = await fetch('/api/edit', {
         method: 'POST',
