@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BLCK Studio · API Deployment Test</title>
+<style>
+  :root { --signal:#FF5949; --ink:#0A0A0A; --ink-2:#161616; --ink-3:#1F1F1F;
+    --text:#F5F2EC; --text-2:#9A968D; --text-3:#5F5C56; --line:#2D2D2D;
+    --ok:#7FB069; --warn:#E0B341; --err:#FF5949;
+    --mono:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,sans-serif; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--ink);color:var(--text);font-family:var(--sans);padding:40px;line-height:1.6}
+  .wrap{max-width:760px;margin:0 auto}
+  h1{font-size:24px;font-weight:500;margin-bottom:4px}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--text-3);letter-spacing:0.12em;
+    text-transform:uppercase;margin-bottom:32px}
+  .row{display:flex;align-items:center;gap:14px;padding:14px 16px;background:var(--ink-2);
+    border:1px solid var(--line);margin-bottom:8px;font-family:var(--mono);font-size:12px}
+  .row .endpoint{flex:1;color:var(--text-2)}
+  .badge{font-family:var(--mono);font-size:9px;letter-spacing:0.12em;text-transform:uppercase;
+    padding:4px 10px;border:1px solid;min-width:88px;text-align:center}
+  .badge.ok{color:var(--ok);border-color:var(--ok)}
+  .badge.err{color:var(--err);border-color:var(--err)}
+  .badge.pending{color:var(--text-3);border-color:var(--text-3)}
+  .verdict{padding:20px;background:var(--ink-2);border:1px solid var(--line);margin-top:24px;
+    font-family:var(--mono);font-size:11px;line-height:1.8;letter-spacing:0.04em}
+  .verdict.ok{border-color:var(--ok)}
+  .verdict.err{border-color:var(--err)}
+  .verdict h2{font-family:var(--sans);font-size:16px;font-weight:600;margin-bottom:8px;
+    letter-spacing:0;text-transform:none}
+  .verdict.ok h2{color:var(--ok)}
+  .verdict.err h2{color:var(--err)}
+  code{background:var(--ink-3);padding:2px 6px;border:1px solid var(--line);color:var(--text)}
+  pre{background:var(--ink-3);padding:14px;border:1px solid var(--line);margin-top:12px;
+    overflow:auto;font-size:11px;line-height:1.5;color:var(--text-2)}
+  a{color:var(--signal);text-decoration:underline}
+  .footer{margin-top:32px;font-family:var(--mono);font-size:10px;color:var(--text-3);
+    letter-spacing:0.12em;text-transform:uppercase}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BLCK Studio · API Deployment Test</h1>
+  <div class="sub">SELF-CHECK / RUNS LOCALLY IN YOUR BROWSER</div>
+
+  <p style="color:var(--text-2);margin-bottom:24px">
+    This page tests whether your serverless functions are actually deployed.
+    If any row says <span style="color:var(--err)">NOT DEPLOYED</span>,
+    the corresponding feature in the app will not work.
+  </p>
+
+  <div id="rows"></div>
+
+  <div id="verdict"></div>
+
+  <div class="footer">BLCK.STUDIO · ENDPOINT VERIFICATION · v3</div>
+</div>
+
+<script>
+const endpoints = [
+  { url: '/api/diag', method: 'GET', label: '/api/diag — diagnostic' },
+  { url: '/api/generate', method: 'OPTIONS', label: '/api/generate — image generation' },
+  { url: '/api/edit', method: 'OPTIONS', label: '/api/edit — image editing' },
+  { url: '/api/layout', method: 'OPTIONS', label: '/api/layout — smart layout' },
+  { url: '/api/stock', method: 'OPTIONS', label: '/api/stock — stock photos' },
+];
+
+const rows = document.getElementById('rows');
+const verdict = document.getElementById('verdict');
+
+const results = [];
+
+async function testEndpoint(ep) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `
+    <div class="endpoint">${ep.label}</div>
+    <div class="badge pending" data-status>TESTING...</div>
+  `;
+  rows.appendChild(row);
+  const badge = row.querySelector('[data-status]');
+
+  try {
+    const resp = await fetch(ep.url, { method: ep.method });
+    const text = await resp.text();
+    const trimmed = text.trim();
+    const isHtml = trimmed.startsWith('<') ||
+                   /the page could not be found|404: not found/i.test(trimmed.slice(0, 500));
+
+    if (isHtml) {
+      badge.className = 'badge err';
+      badge.textContent = 'NOT DEPLOYED';
+      results.push({ ep, ok: false, reason: 'Returns HTML (Vercel 404)' });
+      return;
+    }
+
+    // For OPTIONS, anything non-HTML is good (204, 200, even 405)
+    // For GET /api/diag, expect a 200 with JSON ok:true
+    if (ep.method === 'GET' && resp.ok) {
+      try {
+        const data = JSON.parse(text);
+        if (data.ok) {
+          badge.className = 'badge ok';
+          badge.textContent = 'WORKING';
+          results.push({ ep, ok: true, data });
+          return;
+        }
+      } catch (e) {}
+    }
+
+    if (resp.status === 204 || resp.status === 200 || resp.status === 405) {
+      badge.className = 'badge ok';
+      badge.textContent = 'DEPLOYED';
+      results.push({ ep, ok: true });
+    } else {
+      badge.className = 'badge err';
+      badge.textContent = 'STATUS ' + resp.status;
+      results.push({ ep, ok: false, reason: 'status ' + resp.status });
+    }
+  } catch (e) {
+    badge.className = 'badge err';
+    badge.textContent = 'NETWORK ERR';
+    results.push({ ep, ok: false, reason: e.message });
+  }
+}
+
+async function run() {
+  for (const ep of endpoints) await testEndpoint(ep);
+
+  const failCount = results.filter(r => !r.ok).length;
+  if (failCount === 0) {
+    verdict.className = 'verdict ok';
+    verdict.innerHTML = `
+      <h2>✓ All endpoints deployed</h2>
+      <div>Your serverless functions are live. If the app still shows errors,
+      visit <a href="/api/diag">/api/diag</a> to verify that GEMINI_API_KEY
+      and other env vars are configured correctly.</div>
+    `;
+  } else if (failCount === endpoints.length) {
+    verdict.className = 'verdict err';
+    verdict.innerHTML = `
+      <h2>✗ Zero endpoints are deployed</h2>
+      <div>This means the <code>api/</code> folder is not in your Vercel
+      deployment, OR your <code>vercel.json</code> is preventing function
+      detection.</div>
+      <div style="margin-top:14px"><strong style="color:var(--text)">Fix steps in order:</strong></div>
+      <pre>1. In your local project folder, verify these files exist:
+   - vercel.json
+   - api/diag.js (and 10 more files in api/)
+
+2. Verify vercel.json contents are EXACTLY:
+   {
+     "$schema": "https://openapi.vercel.sh/vercel.json",
+     "functions": { "api/**/*.js": { "maxDuration": 60 } }
+   }
+
+3. In your terminal, from the project folder:
+   $ vercel link        # confirm you're linked to the right project
+   $ vercel deploy --prod --force
+
+4. After deploy completes, refresh this page.
+
+5. If still failing — go to your Vercel dashboard:
+   Project Settings → General → Build & Output Settings
+   - "Framework Preset" should be "Other"
+   - "Output Directory" should be empty or "public"
+   - "Build Command" should be empty
+   Then redeploy.</pre>
+    `;
+  } else {
+    verdict.className = 'verdict err';
+    verdict.innerHTML = `
+      <h2>⚠ Partial deployment — ${failCount} of ${endpoints.length} endpoints missing</h2>
+      <div>Some functions deployed, others didn't. Most likely cause: those
+      files are missing from your project. Verify the api/ folder contains
+      all 11 files, then redeploy with <code>vercel deploy --prod --force</code>.</div>
+    `;
+  }
+}
+
+run();
+</script>
+</body>
+</html>
