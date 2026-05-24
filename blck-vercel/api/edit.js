@@ -7,25 +7,20 @@
  *     image: "data:image/...;base64,..." | { mime: string, data: string },
  *     mode?: "edit" | "remove-bg" | "upscale" | "stylize",
  *     imageSize?: "512"|"1K"|"2K"|"4K",
- *     thinkingLevel?: "minimal"|"high"
+ *     thinkingLevel?: "low"|"medium"|"high"
  *   }
  *
- * Response:
- *   { ok: true, image: "data:image/png;base64,...", mime: "image/png" }
- *   { ok: false, error: "..." }
- *
- * Uses Nano Banana 2 (Gemini 3.1 Flash Image Preview). For editing, we don't
- * pass an aspectRatio — the docs say the model defaults to matching the input
- * image's dimensions, which is what we want for "edit" mode. For upscale, we
- * explicitly bump imageSize.
+ * Uses Nano Banana Pro (Gemini 3 Pro Image Preview). For editing we omit
+ * aspectRatio so the model matches the input image's dimensions. For upscale
+ * we explicitly request a larger imageSize.
  */
 
-const MODEL = 'gemini-3.1-flash-image-preview';
+const MODEL = 'gemini-3-pro-image-preview';
 const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 const ALLOWED_SIZES = ['512', '1K', '2K', '4K'];
-const ALLOWED_THINKING = ['minimal', 'high'];
+const ALLOWED_THINKING = ['low', 'medium', 'high'];
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
@@ -72,7 +67,6 @@ export default async function handler(req, res) {
         'Return only the subject on transparent background. PNG output.';
     } else if (mode === 'upscale') {
       finalPrompt = 'Upscale this image. Increase resolution and sharpness, recover fine detail, reduce noise and compression artifacts. Do not change the composition, colors, or content.';
-      // For upscale, request a larger output
       imageSize = imageSize || '4K';
     } else if (mode === 'stylize') {
       finalPrompt = (prompt || 'Apply a polished editorial design style.') + ' Preserve the subject and composition. Do not add or remove objects.';
@@ -80,7 +74,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'prompt is required for edit mode' });
     }
 
-    const thinkingLevel = ALLOWED_THINKING.includes(body.thinkingLevel) ? body.thinkingLevel : 'minimal';
+    let rawThinking = body.thinkingLevel;
+    if (rawThinking === 'minimal') rawThinking = 'low';
+    const thinkingLevel = ALLOWED_THINKING.includes(rawThinking) ? rawThinking : 'low';
 
     const payload = {
       contents: [{
@@ -90,11 +86,9 @@ export default async function handler(req, res) {
         ],
       }],
       generationConfig: {
-        responseModalities: ['IMAGE'],
         thinkingConfig: { thinkingLevel },
-        // Only include responseFormat if caller requested a specific size.
-        // Omitting it lets the model match the input image's dimensions.
-        ...(imageSize ? { responseFormat: { image: { imageSize } } } : {}),
+        // Only include imageConfig if caller specifically requested a size
+        ...(imageSize ? { imageConfig: { imageSize } } : {}),
       },
     };
 
@@ -127,7 +121,7 @@ export default async function handler(req, res) {
       console.error('[edit] No image returned', { finishReason });
       return res.status(502).json({
         ok: false,
-        error: 'Model returned no image. The prompt may have been filtered, or your project does not have access to Nano Banana 2.',
+        error: 'Model returned no image. The prompt may have been filtered, or your project does not have access to Nano Banana Pro.',
         finishReason,
       });
     }
@@ -158,7 +152,6 @@ function parseImageInput(image) {
 }
 
 function findImagePart(data) {
-  // Skip thinking-mode interim "thought images"; use the final inline image.
   const parts = data?.candidates?.[0]?.content?.parts || [];
   let finalPart = null;
   for (const p of parts) {
