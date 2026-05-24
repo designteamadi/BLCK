@@ -2289,7 +2289,7 @@ const App = (function(){
     } else if (activeLeftPanel === 'ai') {
       c.innerHTML = `
         <div class="panel-section">
-          <div class="panel-section-title"><span>Generate asset</span><span class="num">GEMINI / NANO BANANA 2</span></div>
+          <div class="panel-section-title"><span>Generate asset</span><span class="num">GEMINI / NANO BANANA PRO</span></div>
           <textarea class="ai-prompt" id="ai-prompt" placeholder="e.g. a gold metallic 3D star burst with sparkles, studio lighting"></textarea>
           <div class="prop-row" style="margin-top:10px">
             <label>Ratio</label>
@@ -2306,7 +2306,7 @@ const App = (function(){
                 <option value="5:4">Print 5:4</option>
                 <option value="21:9">Cinema 21:9</option>
               </optgroup>
-              <optgroup label="Extreme (Nano Banana 2)">
+              <optgroup label="Extreme (Nano Banana Pro)">
                 <option value="1:4">Tall banner 1:4</option>
                 <option value="4:1">Wide banner 4:1</option>
                 <option value="1:8">Ultra-tall 1:8</option>
@@ -2326,8 +2326,9 @@ const App = (function(){
           <div class="prop-row" style="margin-top:6px">
             <label>Thinking</label>
             <select id="ai-thinking">
-              <option value="minimal" selected>Minimal · faster</option>
-              <option value="high">High · better quality</option>
+              <option value="low" selected>Low · fastest</option>
+              <option value="medium">Medium · balanced</option>
+              <option value="high">High · best quality</option>
             </select>
           </div>
           <div class="prop-row" style="margin-top:6px">
@@ -2338,10 +2339,10 @@ const App = (function(){
             </div>
           </div>
           <button class="btn btn-primary btn-block btn-sm" style="margin-top:10px" id="btn-ai-gen">
-            ${ic('wand-magic-sparkles')} Generate with Nano Banana 2
+            ${ic('wand-magic-sparkles')} Generate with Nano Banana Pro
           </button>
           <div style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);letter-spacing:0.1em;text-transform:uppercase;margin-top:8px;line-height:1.6">
-            Powered by Gemini 3.1 Flash Image · SynthID watermarked
+            Powered by Gemini 3 Pro Image · SynthID watermarked
           </div>
         </div>
         <div class="panel-section">
@@ -2355,7 +2356,7 @@ const App = (function(){
           <div class="panel-section-title"><span>Edit selected image</span><span class="num">IMG → IMG</span></div>
           <textarea class="ai-prompt" id="ai-edit-prompt" placeholder="e.g. make it more vibrant; add dramatic lighting; convert to watercolor" style="min-height:48px"></textarea>
           <button class="btn btn-block btn-sm" style="margin-top:8px" id="btn-ai-edit">
-            ${ic('pen-to-square')} Edit with Nano Banana 2
+            ${ic('pen-to-square')} Edit with Nano Banana Pro
           </button>
           <button class="btn btn-block btn-sm" style="margin-top:6px" id="btn-ai-remove-bg">
             ${ic('eraser')} Remove background (AI)
@@ -2372,7 +2373,7 @@ const App = (function(){
       $('#btn-ai-gen').onclick = () => generateAIElement($('#ai-prompt').value, {
         aspectRatio: $('#ai-aspect').value,
         imageSize: $('#ai-size')?.value || '1K',
-        thinkingLevel: $('#ai-thinking')?.value || 'minimal',
+        thinkingLevel: $('#ai-thinking')?.value || 'low',
         mode: aiMode,
       });
       $$('[data-ai-quick]', c).forEach(b => {
@@ -2381,7 +2382,7 @@ const App = (function(){
           generateAIElement(b.dataset.aiQuick, {
             aspectRatio: $('#ai-aspect').value,
             imageSize: $('#ai-size')?.value || '1K',
-            thinkingLevel: $('#ai-thinking')?.value || 'minimal',
+            thinkingLevel: $('#ai-thinking')?.value || 'low',
             mode: aiMode,
           });
         };
@@ -2436,18 +2437,18 @@ const App = (function(){
     if (optsOrAspect && typeof optsOrAspect === 'object') {
       aspectRatio = optsOrAspect.aspectRatio || '1:1';
       imageSize = optsOrAspect.imageSize || '1K';
-      thinkingLevel = optsOrAspect.thinkingLevel || 'minimal';
+      thinkingLevel = optsOrAspect.thinkingLevel || 'low';
       mode = optsOrAspect.mode || 'transparent';
     } else {
       aspectRatio = optsOrAspect || '1:1';
       imageSize = '1K';
-      thinkingLevel = 'minimal';
+      thinkingLevel = 'low';
       mode = modeArg || 'transparent';
     }
     const transparent = mode === 'transparent';
 
     const results = $('#ai-results');
-    results.innerHTML = '<div class="ai-result" style="grid-column:1/-1;aspect-ratio:auto;padding:18px"><div class="spinner"></div><div style="margin-left:12px;font-family:var(--font-mono);font-size:9px;letter-spacing:0.12em;color:var(--text-2)">NANO BANANA 2 · GENERATING</div></div>';
+    results.innerHTML = '<div class="ai-result" style="grid-column:1/-1;aspect-ratio:auto;padding:18px"><div class="spinner"></div><div style="margin-left:12px;font-family:var(--font-mono);font-size:9px;letter-spacing:0.12em;color:var(--text-2)">NANO BANANA PRO · GENERATING</div></div>';
 
     try {
       const r = await safeApi('/api/generate', {
@@ -2517,7 +2518,7 @@ const App = (function(){
     if (mode === 'edit' && !promptText.trim()) {
       toast('Describe what to change', 'err'); return;
     }
-    toast(mode === 'remove-bg' ? 'Removing background with Nano Banana 2...' : 'Editing with Nano Banana 2...', '', 'GEMINI.PROC');
+    toast(mode === 'remove-bg' ? 'Removing background with Nano Banana Pro...' : 'Editing with Nano Banana Pro...', '', 'GEMINI.PROC');
     try {
       const r = await safeApi('/api/edit', {
         method: 'POST',
@@ -2686,7 +2687,7 @@ const App = (function(){
     const el = sel[0];
 
     // Try Gemini first (higher quality), fall back to local chroma-key if offline / no API key
-    toast('Removing background with Nano Banana 2...','','BG.PROC');
+    toast('Removing background with Nano Banana Pro...','','BG.PROC');
     try {
       const resp = await fetch('/api/edit', {
         method: 'POST',
