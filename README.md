@@ -4,7 +4,7 @@
 
 ![status](https://img.shields.io/badge/status-production-FF5949)
 ![runtime](https://img.shields.io/badge/runtime-Node%2020-0A0A0A)
-![ai](https://img.shields.io/badge/AI-Gemini%202.5%20Flash%20Image-5b8def)
+![ai](https://img.shields.io/badge/AI-Nano%20Banana%202-5b8def)
 
 ---
 
@@ -21,6 +21,63 @@ vercel deploy --prod
 You'll get a live URL. The base app — editor, PSD parsing, templates, brand kits, AI generation, AI editing — works at this point.
 
 **Want cloud accounts + collaboration?** Add the optional setup below.
+
+---
+
+## Troubleshooting
+
+### Check what's configured
+
+Visit `https://YOUR_DEPLOYMENT.vercel.app/api/diag` in your browser. It shows:
+
+- Which environment variables are set (booleans only, never values)
+- Whether each API key actually works (Gemini, Pexels, Pixabay, Unsplash)
+- Which app features are currently available
+- Specific suggestions for what to fix
+
+There's also a `DIAGNOSTICS` link in the footer of the app for quick access.
+
+### Common issues
+
+**"Gemini error — Server missing GEMINI_API_KEY"**
+- Add `GEMINI_API_KEY` under Vercel project → Settings → Environment Variables
+- Make sure you redeploy after adding it (env vars are read at function start)
+- Get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+
+**"Generate failed — 404 / model not found" or diag shows `hasNanoBanana2: false`**
+- Your API key exists but doesn't have access to `gemini-3.1-flash-image-preview` (Nano Banana 2)
+- Nano Banana 2 is a preview model — most accounts get access automatically, but free-tier projects may need billing enabled at [aistudio.google.com/billing](https://aistudio.google.com/billing)
+- Once enabled, the free quota of 10 images/day still applies for cost-free testing
+
+**"Generate failed — 403 Forbidden"**
+- Same root cause as 404: your project doesn't have permission for the preview image model
+- Enable billing on the Google AI Studio project
+
+**"Smart layout: Gemini API 404"**
+- You're hitting the old `gemini-2.0-flash` model which shuts down June 1, 2026
+- Make sure you're using the latest build — it uses `gemini-2.5-flash` for layout
+
+**"Smart layout: Model returned no image" or "no response"**
+- Your API key may not have access to image generation. Image generation requires a project with billing enabled (free-tier exhausts daily quickly)
+- For text-only Smart Layout, the free tier of `gemini-2.5-flash` is generous
+
+**"Smart layout error 429"**
+- You've hit the rate limit. Wait a minute and try again. If frequent, enable billing on your Google AI Studio project.
+
+**"Stock photos: No source configured"**
+- Add at least one of `PEXELS_API_KEY`, `PIXABAY_API_KEY`, or `UNSPLASH_ACCESS_KEY`
+- Pexels and Pixabay sign-up gives an instant key
+- The Stock tab still loads — it just tells you to configure a source
+
+### Forced redeploy after adding env vars
+
+Vercel doesn't always rebuild when only env vars change. Force a redeploy:
+
+```bash
+vercel deploy --prod --force
+```
+
+Or in the dashboard: Deployments → ... → Redeploy → "Use existing build cache" off.
 
 ---
 
@@ -119,14 +176,29 @@ The toggle lives in the ratio picker. Default is **ON**.
 
 Re-run the layout pass on any existing artboard via the artboard context menu → **Redesign with AI**.
 
-### Gemini AI
+### Gemini AI · Nano Banana 2
+
+Image generation is powered by **Nano Banana 2** (model ID `gemini-3.1-flash-image-preview`), Google's latest image model launched February 2026. It currently ranks #1 on the Artificial Analysis Image Arena leaderboard for text-to-image.
 
 Server-side serverless functions keep your API key safe.
 
-- `/api/generate` — text → image at 10 aspect ratios, optional transparent background mode for sticker assets
-- `/api/edit` — image + text → image with 4 modes: natural-language edit, background removal, upscale, stylize
+- `/api/generate` — text → image
+  - 14 aspect ratios including new ultra-wide and ultra-tall: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`, `1:4`, `4:1`, `1:8`, `8:1`
+  - 4 resolutions: `512`, `1K` (default), `2K`, `4K`
+  - 2 thinking levels: `minimal` (default, fastest) or `high` (better quality on complex prompts)
+  - Optional transparent background mode for sticker/asset use
+- `/api/edit` — image + text → image with 4 modes:
+  - `edit` — natural-language image editing
+  - `remove-bg` — background removal with transparent alpha
+  - `upscale` — automatic 4K upgrade
+  - `stylize` — apply a design style while preserving subject
 
-The browser never sees the API key.
+The browser never sees the API key. All generated images include Google's SynthID invisible watermark for provenance.
+
+**Pricing** (per Google's billing page):
+- 1K / 2K image: ~$0.067
+- 4K image: ~$0.12
+- Free tier on Google AI Studio includes 10 images/day; beyond that requires billing enabled.
 
 ### Templates
 
@@ -206,11 +278,18 @@ blck-vercel-v3-final/
 {
   "prompt": "a metallic 3D star burst, gold, studio lighting",
   "aspectRatio": "1:1",
+  "imageSize": "1K",
+  "thinkingLevel": "minimal",
   "transparent": true
 }
 ```
 
-Returns `{ ok: true, image: "data:image/png;base64,..." }`. Aspect ratio is one of `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`.
+Returns `{ ok: true, image: "data:image/png;base64,...", model: "gemini-3.1-flash-image-preview", aspectRatio, imageSize }`.
+
+- `aspectRatio` (default `"1:1"`) — one of `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`, `1:4`, `4:1`, `1:8`, `8:1`
+- `imageSize` (default `"1K"`) — `"512"`, `"1K"`, `"2K"`, or `"4K"`
+- `thinkingLevel` (default `"minimal"`) — `"minimal"` for speed, `"high"` for quality on complex prompts
+- `transparent` (default `false`) — prompts the model for a transparent background (sticker/asset mode)
 
 ### `POST /api/edit`
 
@@ -218,11 +297,13 @@ Returns `{ ok: true, image: "data:image/png;base64,..." }`. Aspect ratio is one 
 {
   "image": "data:image/png;base64,...",
   "prompt": "make the lighting more dramatic",
-  "mode": "edit"
+  "mode": "edit",
+  "imageSize": "2K",
+  "thinkingLevel": "minimal"
 }
 ```
 
-Mode is `edit`, `remove-bg`, `upscale`, or `stylize`.
+Mode is `edit`, `remove-bg`, `upscale`, or `stylize`. The `upscale` mode automatically requests `imageSize: "4K"` unless overridden.
 
 ### `POST /api/layout`
 
@@ -306,12 +387,12 @@ Body: `{ projects, folders, groups }`. Replaces all user data with the snapshot.
 
 ## Costs
 
-- **Gemini 2.5 Flash Image:** ~$0.039 per image. Free tier covers casual use.
+- **Nano Banana 2 (Gemini 3.1 Flash Image Preview):** ~$0.067 per 1K/2K image, ~$0.12 per 4K image. Free tier (10/day on AI Studio) covers casual use. Smart Layout uses `gemini-2.5-flash` (text only) at fractions of a cent per call.
 - **Vercel:** Hobby tier covers all serverless functions; Pro starts at $20/mo if you exceed bandwidth.
 - **Postgres:** Vercel's Hobby Postgres is free up to 256 MB storage and 60 hours/month compute.
 - **Resend:** 3,000 emails/month free.
 
-For most personal use, total cost is **$0/month** plus pennies for Gemini.
+For most personal use, total cost is **$0/month** plus pennies-to-dollars for Gemini depending on volume.
 
 ---
 
