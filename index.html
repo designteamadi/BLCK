@@ -1978,10 +1978,25 @@ const App = (function(){
     opts = opts || {};
     const indicator = showSmartLayoutBadge(ab);
     try {
+      // Render the master artboard to a small PNG so Gemini can SEE the design.
+      // This is the key fix that makes Smart Layout produce intentional layouts
+      // instead of mechanical reshuffles of coordinates.
+      let imageBase64 = null;
+      try {
+        const canvas = await renderArtboardToCanvas(master, 768);
+        imageBase64 = canvas.toDataURL('image/jpeg', 0.85);
+        // Keep payload small: only the base64 data, no prefix
+        const m = imageBase64.match(/^data:[^;]+;base64,(.+)$/);
+        if (m) imageBase64 = m[1];
+      } catch (e) {
+        console.warn('[smartLayout] could not render master image, falling back to JSON-only', e);
+      }
+
       const payload = {
         master: {
           width: master.width,
           height: master.height,
+          imageBase64,
           elements: master.elements.map(el => ({
             id: el.id,
             type: el.type,
@@ -2359,7 +2374,7 @@ const App = (function(){
             ${ic('pen-to-square')} Edit with Nano Banana Pro
           </button>
           <button class="btn btn-block btn-sm" style="margin-top:6px" id="btn-ai-remove-bg">
-            ${ic('eraser')} Remove background (AI)
+            ${ic('eraser')} Remove background (RMBG-1.4 · in-browser)
           </button>
         </div>`;
       // Mode toggle
@@ -2388,7 +2403,7 @@ const App = (function(){
         };
       });
       $('#btn-ai-edit').onclick = () => geminiEditSelected($('#ai-edit-prompt').value, 'edit');
-      $('#btn-ai-remove-bg').onclick = () => geminiEditSelected('', 'remove-bg');
+      $('#btn-ai-remove-bg').onclick = () => removeBackgroundOfSelected();
     } else if (activeLeftPanel === 'stock') {
       c.innerHTML = `
         <div class="panel-section">
@@ -2681,63 +2696,159 @@ const App = (function(){
     img.src = imgUrl;
   }
 
+  // ============================================================
+  // BACKGROUND REMOVAL (client-side AI)
+  // ============================================================
+  // Uses RMBG-1.4 from BRIA AI via @huggingface/transformers, loaded from CDN.
+  // Runs entirely in the user's browser via WebAssembly (or WebGPU when
+  // available). First call downloads the model (~45MB, cached forever after).
+  // Quality is SOTA — matches commercial services like remove.bg.
+  //
+  // Why not Gemini for this? Gemini image editing can't produce true
+  // alpha-channel cutouts reliably. RMBG is a purpose-built segmentation
+  // model and handles edges, hair, fine detail much better.
+
+  let bgRemovalPipeline = null;     // cached pipeline instance
+  let bgRemovalLoading = null;      // promise during initial download
+
+  async function loadBgRemovalPipeline(onProgress) {
+    if (bgRemovalPipeline) return bgRemovalPipeline;
+    if (bgRemovalLoading) return bgRemovalLoading;
+
+    bgRemovalLoading = (async () => {
+      const transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2/+esm');
+      // Use WebGPU if available, fallback to WASM. RMBG-1.4 works in both.
+      let device = 'wasm';
+      try {
+        if (navigator.gpu) {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (adapter) device = 'webgpu';
+        }
+      } catch (e) { /* WebGPU not available */ }
+
+      // Allow remote models from huggingface
+      transformers.env.allowLocalModels = false;
+      transformers.env.allowRemoteModels = true;
+
+      const pipe = await transformers.pipeline(
+        'image-segmentation',
+        'briaai/RMBG-1.4',
+        {
+          device,
+          progress_callback: (info) => {
+            if (onProgress && info.status === 'progress' && info.file) {
+              const pct = info.total ? Math.round((info.loaded / info.total) * 100) : 0;
+              onProgress({ file: info.file, percent: pct, status: info.status });
+            }
+          },
+        }
+      );
+      bgRemovalPipeline = pipe;
+      bgRemovalPipeline._device = device;
+      return pipe;
+    })();
+    try {
+      return await bgRemovalLoading;
+    } finally {
+      bgRemovalLoading = null;
+    }
+  }
+
   async function removeBackgroundOfSelected() {
     const sel = selectedElements();
     if (sel.length !== 1 || sel[0].type !== 'image') { toast('Select one image', 'err'); return; }
     const el = sel[0];
 
-    // Try Gemini first (higher quality), fall back to local chroma-key if offline / no API key
-    toast('Removing background with Nano Banana Pro...','','BG.PROC');
-    try {
-      const resp = await fetch('/api/edit', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({image: el.src, mode: 'remove-bg'})
-      });
-      const json = await resp.json();
-      if (json.ok) {
-        el.src = json.image;
-        const ab = state.artboards.find(a=>a.elements.includes(el));
-        if (ab && ab.isMaster) syncFromMaster();
-        pushHistory(); renderAll();
-        toast('Background removed', 'ok', 'BG.DONE');
-        return;
+    // Show a progress UI for first-time model download
+    let progressEl = null;
+    function showProgress(msg) {
+      if (!progressEl) {
+        progressEl = document.createElement('div');
+        progressEl.style.cssText = 'position:fixed;top:60px;right:20px;z-index:9999;background:var(--ink-2);border:1px solid var(--signal);padding:14px 18px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.08em;color:var(--text);min-width:240px';
+        document.body.appendChild(progressEl);
       }
-      toast('Gemini unavailable, using local fallback', '', 'BG.FALLBACK');
-    } catch(e) {
-      toast('Network error, using local fallback', '', 'BG.FALLBACK');
+      progressEl.innerHTML = msg;
     }
+    function hideProgress() { if (progressEl) { progressEl.remove(); progressEl = null; } }
 
-    // Local fallback: corner-sample chroma key
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = img.naturalWidth; c.height = img.naturalHeight;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const imgData = ctx.getImageData(0, 0, c.width, c.height);
-      const d = imgData.data;
-      const samples = [[0,0],[c.width-1,0],[0,c.height-1],[c.width-1,c.height-1],
-        [c.width/2|0,0],[c.width/2|0,c.height-1],[0,c.height/2|0],[c.width-1,c.height/2|0]];
-      const corners = samples.map(([x,y])=>{ const i = (y*c.width+x)*4; return [d[i], d[i+1], d[i+2]]; });
-      const threshold = 70;
-      for (let i=0;i<d.length;i+=4) {
-        const r=d[i], g=d[i+1], b=d[i+2];
-        for (const cc of corners) {
-          const dr=r-cc[0], dg=g-cc[1], db=b-cc[2];
-          if (Math.sqrt(dr*dr+dg*dg+db*db) < threshold) { d[i+3] = 0; break; }
-        }
+    try {
+      // Load the pipeline (downloads model on first call)
+      if (!bgRemovalPipeline) {
+        showProgress('LOADING MODEL · FIRST TIME ONLY<br><span style="color:var(--text-3);font-size:9px">~45MB · cached forever after</span>');
       }
-      ctx.putImageData(imgData, 0, 0);
-      el.src = c.toDataURL('image/png');
-      const ab = state.artboards.find(a=>a.elements.includes(el));
+      const pipe = await loadBgRemovalPipeline((info) => {
+        if (info.status === 'progress') {
+          showProgress(`DOWNLOADING<br><span style="color:var(--text-3);font-size:9px">${info.file.slice(0, 36)}<br>${info.percent}%</span>`);
+        }
+      });
+
+      showProgress('REMOVING BACKGROUND<br><span style="color:var(--text-3);font-size:9px">Device: ' + (bgRemovalPipeline._device || 'wasm') + '</span>');
+
+      // The pipeline expects a URL or data URL. Pre-load the image to ensure CORS works.
+      const img = await loadImage(el.src);
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const inputDataUrl = canvas.toDataURL('image/png');
+
+      // Run segmentation. Output is a mask where label 'background' has values 0..255.
+      const output = await pipe(inputDataUrl);
+      // The pipeline returns either [{mask, label, score}, ...] or a single object;
+      // RMBG returns one segment representing the FOREGROUND, with a mask we composite.
+      const segment = Array.isArray(output) ? output[0] : output;
+      if (!segment || !segment.mask) {
+        throw new Error('Model returned no mask');
+      }
+
+      // Composite: apply mask to alpha channel of the original image
+      const result = document.createElement('canvas');
+      result.width = img.naturalWidth;
+      result.height = img.naturalHeight;
+      const rctx = result.getContext('2d');
+      rctx.drawImage(img, 0, 0);
+      const imgData = rctx.getImageData(0, 0, result.width, result.height);
+      const mask = segment.mask;
+      // Mask is a RawImage with .data (Uint8Array) and .width/.height
+      // If mask size doesn't match (it usually does), we scale via canvas
+      let maskData = mask.data;
+      if (mask.width !== result.width || mask.height !== result.height) {
+        // Upscale mask to image size via canvas
+        const mc = document.createElement('canvas');
+        mc.width = mask.width; mc.height = mask.height;
+        const mctx = mc.getContext('2d');
+        const md = mctx.createImageData(mask.width, mask.height);
+        for (let i = 0; i < mask.data.length; i++) {
+          md.data[i*4] = md.data[i*4+1] = md.data[i*4+2] = mask.data[i];
+          md.data[i*4+3] = 255;
+        }
+        mctx.putImageData(md, 0, 0);
+        const rc = document.createElement('canvas');
+        rc.width = result.width; rc.height = result.height;
+        const rctx2 = rc.getContext('2d');
+        rctx2.drawImage(mc, 0, 0, result.width, result.height);
+        const rd = rctx2.getImageData(0, 0, result.width, result.height);
+        maskData = new Uint8Array(result.width * result.height);
+        for (let i = 0; i < maskData.length; i++) maskData[i] = rd.data[i*4];
+      }
+      // Apply: maskData[i] is the alpha (0=background, 255=foreground)
+      for (let i = 0; i < maskData.length; i++) {
+        imgData.data[i*4 + 3] = maskData[i];
+      }
+      rctx.putImageData(imgData, 0, 0);
+
+      el.src = result.toDataURL('image/png');
+      const ab = state.artboards.find(a => a.elements.includes(el));
       if (ab && ab.isMaster) syncFromMaster();
       pushHistory(); renderAll();
-      toast('Background removed','ok','BG.DONE');
-    };
-    img.onerror = () => toast('Image load failed', 'err');
-    img.src = el.src;
+      hideProgress();
+      toast('Background removed (RMBG-1.4 · ' + (bgRemovalPipeline._device || 'wasm') + ')', 'ok', 'BG.DONE');
+    } catch (err) {
+      hideProgress();
+      console.error('[bgRemove]', err);
+      toast('Background removal failed: ' + (err.message || 'unknown'), 'err', 'BG.ERR');
+    }
   }
 
   function renderProperties() {
