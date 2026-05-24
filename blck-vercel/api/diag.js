@@ -60,16 +60,16 @@ async function pingGemini() {
       const data = await r.json();
       const modelNames = (data.models || []).map(m => m.name);
       // Look for the specific models we use
-      const hasNanoBanana2 = modelNames.some(n => n.includes('gemini-3.1-flash-image-preview'));
+      const hasNanoBananaPro = modelNames.some(n => n.includes('gemini-3-pro-image-preview'));
       const hasLayoutModel = modelNames.some(n => n.includes('gemini-2.5-flash') && !n.includes('image'));
       const note = [];
-      if (!hasNanoBanana2) note.push('gemini-3.1-flash-image-preview not found in your account — image generation will fail. Your project may need billing enabled to access preview models.');
+      if (!hasNanoBananaPro) note.push('gemini-3-pro-image-preview not found in your account — image generation will fail. Your project may need billing enabled to access preview models.');
       if (!hasLayoutModel) note.push('gemini-2.5-flash not visible — Smart Layout may fail.');
       return {
         ok: true,
         status: r.status,
         modelCount: modelNames.length,
-        hasNanoBanana2,
+        hasNanoBananaPro,
         hasLayoutModel,
         note: note.join(' ') || null,
       };
@@ -120,8 +120,8 @@ function buildSuggestions(env, checks) {
     out.push('Set GEMINI_API_KEY to enable AI generate, edit, and Smart Layout. Get a key at https://aistudio.google.com/apikey then add it under Vercel project Settings -> Environment Variables and redeploy.');
   } else if (!checks.gemini.ok) {
     out.push(`Gemini key is set but the API rejected it: ${checks.gemini.error}. The key may be invalid, restricted to specific APIs, or the project may need billing enabled.`);
-  } else if (checks.gemini.hasNanoBanana2 === false) {
-    out.push('Your Gemini key works but does NOT have access to gemini-3.1-flash-image-preview (Nano Banana 2). Image generation will return 404 or 403. Enable billing on your Google AI Studio project at https://aistudio.google.com/billing — preview image models require a paid tier.');
+  } else if (checks.gemini.hasNanoBananaPro === false) {
+    out.push('Your Gemini key works but does NOT have access to gemini-3-pro-image-preview (Nano Banana Pro). Image generation will return 404 or 403. Enable billing on your Google AI Studio project at https://aistudio.google.com/billing — preview image models require a paid tier.');
   }
   if (!env.PEXELS_API_KEY && !env.PIXABAY_API_KEY && !env.UNSPLASH_ACCESS_KEY) {
     out.push('No stock photo source is configured. Add PEXELS_API_KEY, PIXABAY_API_KEY, or UNSPLASH_ACCESS_KEY to enable the Stock tab.');
