@@ -2756,32 +2756,53 @@ const App = (function(){
       // Allow remote models from huggingface
       transformers.env.allowLocalModels = false;
       transformers.env.allowRemoteModels = true;
-      transformers.env.backends.onnx.wasm.proxy = true;
-
-      // Detect WebGPU
-      let device = 'wasm';
-      try {
-        if (navigator.gpu) {
-          const adapter = await navigator.gpu.requestAdapter();
-          if (adapter) device = 'webgpu';
-        }
-      } catch (e) { /* no WebGPU */ }
-      RMBG.device = device;
 
       const modelId = 'briaai/RMBG-1.4';
 
-      // Load model — custom config because RMBG doesn't ship a transformers.js-friendly config.json
-      RMBG.model = await RMBG.AutoModel.from_pretrained(modelId, {
-        config: { model_type: 'custom' },
-        dtype: device === 'webgpu' ? 'fp16' : 'fp32',
-        device,
-        progress_callback: (info) => {
-          if (onProgress && info.status === 'progress' && info.file && info.total) {
-            const pct = Math.round((info.loaded / info.total) * 100);
-            onProgress({ file: info.file, percent: pct });
+      // Build the list of backends to try in order. WebGPU is fast when it
+      // works but a significant fraction of devices have it present but
+      // broken (driver bugs, missing shader features). We try it first and
+      // automatically fall back to WASM (CPU) on any failure.
+      const attempts = [];
+      try {
+        if (navigator.gpu) {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (adapter) {
+            // fp16 is faster but not universally supported — try fp32 as fallback
+            attempts.push({ device: 'webgpu', dtype: 'fp32' });
           }
-        },
-      });
+        }
+      } catch (e) { /* no WebGPU at all */ }
+      // Always have WASM as the final fallback — works on any browser
+      attempts.push({ device: 'wasm', dtype: 'fp32' });
+
+      let lastError = null;
+      for (const attempt of attempts) {
+        try {
+          RMBG.model = await RMBG.AutoModel.from_pretrained(modelId, {
+            config: { model_type: 'custom' },
+            dtype: attempt.dtype,
+            device: attempt.device,
+            progress_callback: (info) => {
+              if (onProgress && info.status === 'progress' && info.file && info.total) {
+                const pct = Math.round((info.loaded / info.total) * 100);
+                onProgress({ file: info.file, percent: pct });
+              }
+            },
+          });
+          RMBG.device = attempt.device;
+          console.log('[RMBG] loaded on', attempt.device, attempt.dtype);
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn('[RMBG]', attempt.device, 'failed:', err.message || err);
+          RMBG.model = null;
+        }
+      }
+
+      if (!RMBG.model) {
+        throw new Error('Could not load RMBG model on any backend. ' + (lastError?.message || ''));
+      }
 
       // Load processor — explicit config required for RMBG-1.4
       RMBG.processor = await RMBG.AutoProcessor.from_pretrained(modelId, {
