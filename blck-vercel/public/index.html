@@ -1835,26 +1835,95 @@ const App = (function(){
     return {x:nx, y:ny, w:newW, h:newH, fontSize};
   }
 
+  // Properties that should sync from master to children (content/style only).
+  // Position and size (x, y, w, h, fontSize) are deliberately NOT in this list —
+  // those are per-artboard concerns and overwriting them destroys Smart Layout.
+  const SYNCABLE_CONTENT_PROPS = [
+    // Text content
+    'text', 'fontFamily', 'fontWeight', 'fontStyle', 'lineHeight', 'letterSpacing',
+    'align', 'color',
+    // Image content
+    'src', 'objectFit', 'filter',
+    // Shape content
+    'fill', 'stroke', 'strokeWidth', 'shape', 'cornerRadius',
+    // Path content
+    'points', 'closed',
+    // Line content
+    'dash',
+    // Visibility / behavior (master can hide an element across the board)
+    'visible', 'opacity', 'rotation',
+    // Metadata
+    'name', 'role',
+    // Layer effects
+    'shadow', 'blur', 'innerShadow',
+    // Blend mode
+    'blendMode',
+  ];
+
   function syncFromMaster() {
-    const master = state.artboards.find(a=>a.isMaster);
+    const master = state.artboards.find(a => a.isMaster);
     if (!master) return;
+
     state.artboards.forEach(ab => {
       if (ab.isMaster) return;
-      ab.elements = master.elements.map(el => {
-        const cloned = JSON.parse(JSON.stringify(el));
-        cloned.id = uid();
-        cloned._fromMaster = el.id;   // preserve hint so "Redesign with AI" still works
-        const fit = fitElementToArtboard(el, master.width, master.height, ab.width, ab.height);
-        cloned.x = fit.x; cloned.y = fit.y;
-        cloned.w = fit.w; cloned.h = fit.h;
-        if (cloned.type === 'text') {
-          cloned.fontSize = fit.fontSize;
-          const imp = elementImportance(cloned);
-          const minSize = imp <= IMPORTANCE.headline ? 24 : imp <= IMPORTANCE.cta ? 16 : 12;
-          if (cloned.fontSize < minSize) cloned.fontSize = minSize;
-        }
-        return cloned;
+
+      // Build lookup of child elements by their _fromMaster hint
+      const childByMasterId = new Map();
+      for (const el of ab.elements) {
+        if (el._fromMaster) childByMasterId.set(el._fromMaster, el);
+      }
+
+      const masterIdSet = new Set(master.elements.map(e => e.id));
+      let structuralChange = false;
+
+      // Remove child elements whose master counterpart was deleted
+      const beforeCount = ab.elements.length;
+      ab.elements = ab.elements.filter(el => {
+        if (!el._fromMaster) return true;             // user-added in child
+        if (masterIdSet.has(el._fromMaster)) return true;
+        return false;                                  // master deleted it
       });
+      if (ab.elements.length !== beforeCount) structuralChange = true;
+
+      // For each master element: either update existing child OR add new
+      for (const mEl of master.elements) {
+        const existing = childByMasterId.get(mEl.id);
+        if (existing) {
+          // SYNC CONTENT ONLY — preserve x/y/w/h/fontSize (the Smart Layout work)
+          for (const prop of SYNCABLE_CONTENT_PROPS) {
+            if (prop in mEl) {
+              // Deep clone arrays/objects to avoid shared references
+              const val = mEl[prop];
+              if (val && typeof val === 'object') {
+                existing[prop] = JSON.parse(JSON.stringify(val));
+              } else {
+                existing[prop] = val;
+              }
+            } else if (prop in existing) {
+              // Master removed this property — clear it on the child too
+              delete existing[prop];
+            }
+          }
+        } else {
+          // NEW element on master — clone into child with proportional placement
+          // and mark for Smart Layout to handle next time
+          const cloned = JSON.parse(JSON.stringify(mEl));
+          cloned.id = uid();
+          cloned._fromMaster = mEl.id;
+          const fit = fitElementToArtboard(mEl, master.width, master.height, ab.width, ab.height);
+          cloned.x = fit.x; cloned.y = fit.y;
+          cloned.w = fit.w; cloned.h = fit.h;
+          if (cloned.type === 'text') cloned.fontSize = fit.fontSize;
+          ab.elements.push(cloned);
+          structuralChange = true;
+        }
+      }
+
+      // Mark for re-layout if structure changed (additions/deletions).
+      // We don't auto-trigger Smart Layout here because user may be in the
+      // middle of an edit — they'd see a flash. Instead, mark stale and let
+      // user re-run from artboard menu, or auto-trigger on next master save.
+      ab._smartLayoutStale = structuralChange;
     });
   }
 
@@ -1983,9 +2052,25 @@ const App = (function(){
       // instead of mechanical reshuffles of coordinates.
       let imageBase64 = null;
       try {
+        // First attempt — render the full master (images + text + shapes)
         const canvas = await renderArtboardToCanvas(master, 768);
-        imageBase64 = canvas.toDataURL('image/jpeg', 0.85);
-        // Keep payload small: only the base64 data, no prefix
+        try {
+          imageBase64 = canvas.toDataURL('image/jpeg', 0.85);
+        } catch (taintErr) {
+          // Canvas was tainted by a cross-origin image whose host doesn't send
+          // Access-Control-Allow-Origin (common with stock photo CDNs even
+          // when crossOrigin='anonymous' is set on the request). Re-render
+          // without images — text/shapes alone still gives Gemini enough
+          // visual context to reason about layout (composition, hierarchy,
+          // color blocking).
+          console.warn('[smartLayout] canvas tainted by cross-origin image, re-rendering without images', taintErr);
+          const masterShallow = {
+            ...master,
+            elements: master.elements.filter(el => el.type !== 'image' || (el.src && el.src.startsWith('data:'))),
+          };
+          const canvas2 = await renderArtboardToCanvas(masterShallow, 768);
+          imageBase64 = canvas2.toDataURL('image/jpeg', 0.85);
+        }
         const m = imageBase64.match(/^data:[^;]+;base64,(.+)$/);
         if (m) imageBase64 = m[1];
       } catch (e) {
@@ -2045,6 +2130,8 @@ const App = (function(){
         }
         updated++;
       }
+      // Clear stale flag — this artboard now has fresh Smart Layout
+      delete ab._smartLayoutStale;
       renderAll();
       if (opts.announce) {
         toast(`Smart layout · ${updated} element${updated===1?'':'s'} placed`, 'ok', 'LAYOUT.OK');
