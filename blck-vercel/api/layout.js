@@ -122,7 +122,13 @@ export default async function handler(req, res) {
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
         temperature: 0.4,
-        maxOutputTokens: 4096,
+        // Higher budget — image input + thinking + JSON for 20 elements can
+        // easily exceed 4096 tokens. Truncation here is the most common cause
+        // of "invalid JSON" errors.
+        maxOutputTokens: 8192,
+        // Disable thinking — image input was triggering verbose thinking
+        // tokens that ate the output budget before JSON could complete.
+        thinkingConfig: { thinkingBudget: 0 },
       },
     };
 
@@ -140,18 +146,62 @@ export default async function handler(req, res) {
     }
 
     const data = await upstream.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    // Concatenate text from ALL parts. Gemini sometimes returns thinking/
+    // commentary as one part and the actual JSON as a later part. Reading
+    // only parts[0] was missing the JSON entirely.
+    const allParts = data?.candidates?.[0]?.content?.parts || [];
+    const text = allParts.map(p => p.text || '').join('').trim();
+    const finishReason = data?.candidates?.[0]?.finishReason;
+
     if (!text) {
-      const finishReason = data?.candidates?.[0]?.finishReason;
-      console.error('[layout] No text response', { finishReason });
-      return res.status(502).json({ ok: false, error: 'Model returned no response. finishReason=' + (finishReason || 'unknown') });
+      console.error('[layout] No text in response', { finishReason, partCount: allParts.length });
+      return res.status(502).json({
+        ok: false,
+        error: 'Model returned no response. finishReason=' + (finishReason || 'unknown'),
+      });
     }
 
+    // If finishReason indicates truncation, the JSON is likely incomplete
+    if (finishReason === 'MAX_TOKENS') {
+      console.error('[layout] Response truncated by MAX_TOKENS');
+      return res.status(502).json({
+        ok: false,
+        error: 'Response truncated. Master design too complex — try fewer elements or simpler text.',
+        finishReason,
+      });
+    }
+
+    // Robust JSON extraction: handle markdown fences, leading prose,
+    // trailing commentary by finding the first { and matching closing }
     let parsed;
-    try { parsed = JSON.parse(text); }
-    catch (e) {
-      console.error('[layout] JSON parse fail:', text.slice(0, 400));
-      return res.status(502).json({ ok: false, error: 'Model returned invalid JSON' });
+    try {
+      parsed = JSON.parse(text);
+    } catch (e1) {
+      // Try stripping markdown fences
+      let stripped = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+      try {
+        parsed = JSON.parse(stripped);
+      } catch (e2) {
+        // Last resort: find first {...} object by brace counting
+        const extracted = extractJsonObject(text);
+        if (extracted) {
+          try { parsed = JSON.parse(extracted); }
+          catch (e3) { /* give up */ }
+        }
+      }
+    }
+
+    if (!parsed) {
+      console.error('[layout] JSON parse fail. Text was:', text.slice(0, 800));
+      return res.status(502).json({
+        ok: false,
+        error: 'Model returned invalid JSON',
+        // Return a snippet of what the model actually said — helps debug
+        // without exposing too much in production
+        modelTextSnippet: text.slice(0, 200),
+        finishReason,
+      });
     }
 
     if (!Array.isArray(parsed.elements)) {
@@ -267,6 +317,30 @@ function num(v, def) { const n = Number(v); return Number.isFinite(n) ? n : def;
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function round(v) { return Math.round(Number(v) || 0); }
 function clip(s, n) { return String(s || '').slice(0, n); }
+
+// Extract the first complete JSON object from text by brace counting.
+// Handles cases where Gemini wraps JSON in prose ("Here's the layout: {...}").
+function extractJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (esc) { esc = false; continue; }
+    if (ch === '\\' && inStr) { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 function extractErrorMessage(text) {
   try { return JSON.parse(text)?.error?.message; } catch (e) { return null; }
 }
