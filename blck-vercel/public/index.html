@@ -380,6 +380,12 @@
   .layer-name input{background:transparent;border:none;padding:0;width:100%;font-size:12px}
   .layer-role{font-family:var(--font-mono);font-size:8px;color:var(--signal);letter-spacing:0.1em;
     text-transform:uppercase;margin-right:4px;padding:1px 4px;border:1px solid var(--signal);}
+  /* CLIPPING MASK INDICATORS */
+  .layer-item.clipped{padding-left:22px;border-left:2px solid var(--signal)}
+  .layer-clip-arrow{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;
+    color:var(--signal);font-size:9px;margin-right:2px;transform:rotate(180deg)}
+  .layer-mask-badge{font-family:var(--font-mono);font-size:8px;letter-spacing:0.12em;
+    color:var(--ink);background:var(--signal);padding:2px 5px;margin-right:4px}
   .layer-actions{display:flex;gap:2px;opacity:0;transition:opacity .1s}
   .layer-item:hover .layer-actions{opacity:1}
   .layer-actions button{width:22px;height:22px;display:flex;align-items:center;justify-content:center;
@@ -649,7 +655,7 @@
   <div class="top-rule">
     <div class="brand">
       <span class="blck">BLCK</span>
-      <span class="ver">v3.2 · RMBG / DESIGN.STUDIO</span>
+      <span class="ver">v3.3 · MASKS / DESIGN.STUDIO</span>
     </div>
     <div class="top-spec">
       <button id="auth-status" class="auth-status" data-action="auth">
@@ -1858,6 +1864,8 @@ const App = (function(){
     'shadow', 'blur', 'innerShadow',
     // Blend mode
     'blendMode',
+    // Clipping masks (mask relationship syncs from master to children)
+    'clippedBy', 'clipBaseHidden', 'clipInvert',
   ];
 
   function syncFromMaster() {
@@ -1956,6 +1964,10 @@ const App = (function(){
   function deleteSelected() {
     if (!state.selectedElementIds.length) return;
     const ab = activeArtboard();
+    // Clean up any clipping relationships referencing the elements being deleted
+    for (const id of state.selectedElementIds) {
+      cleanupClipsForDeletedElement(ab, id);
+    }
     ab.elements = ab.elements.filter(e => !state.selectedElementIds.includes(e.id));
     state.selectedElementIds = [];
     if (ab.isMaster) syncFromMaster();
@@ -1989,6 +2001,110 @@ const App = (function(){
     const ab = activeArtboard(); if (!ab) return [];
     return ab.elements.filter(e => state.selectedElementIds.includes(e.id));
   }
+
+  // ============================================================
+  // CLIPPING MASKS
+  // ============================================================
+  // An element with `clippedBy: id` is clipped to the silhouette of another
+  // element. The ID stored is either the mask element's own id (in the master
+  // artboard) or the mask element's _fromMaster id (in child artboards), so a
+  // single value works correctly when content is synced from master.
+
+  function findMaskElement(ab, clippedByValue) {
+    if (!ab || !clippedByValue) return null;
+    let m = ab.elements.find(e => e.id === clippedByValue);
+    if (m) return m;
+    m = ab.elements.find(e => e._fromMaster === clippedByValue);
+    return m || null;
+  }
+
+  function isClipped(el) { return !!el.clippedBy; }
+
+  function isUsedAsMask(ab, el) {
+    if (!ab) return false;
+    return ab.elements.some(other =>
+      other.clippedBy && (other.clippedBy === el.id || other.clippedBy === el._fromMaster)
+    );
+  }
+
+  function clippedElementsOf(ab, maskEl) {
+    return ab.elements.filter(other =>
+      other.clippedBy && (other.clippedBy === maskEl.id || other.clippedBy === maskEl._fromMaster)
+    );
+  }
+
+  function findArtboardOfElement(el) {
+    return state.artboards.find(a => a.elements.includes(el));
+  }
+
+  function toggleClippingMaskForSelected() {
+    const sel = selectedElements();
+    if (sel.length === 0) { toast('Select a layer first'); return; }
+    const ab = activeArtboard(); if (!ab) return;
+    let anyChanged = false;
+    let anyFailed = false;
+    for (const el of sel) {
+      if (el.clippedBy) {
+        delete el.clippedBy;
+        anyChanged = true;
+      } else {
+        const sorted = [...ab.elements].sort((a,b) => a.z - b.z);
+        const idx = sorted.findIndex(e => e.id === el.id);
+        if (idx > 0) {
+          el.clippedBy = sorted[idx - 1]._fromMaster || sorted[idx - 1].id;
+          anyChanged = true;
+        } else {
+          anyFailed = true;
+        }
+      }
+    }
+    if (anyChanged) {
+      pushHistory();
+      renderAll();
+      const released = sel.some(e => !e.clippedBy);
+      toast(released ? 'Clipping mask released' : 'Clipping mask applied', 'ok', 'MASK');
+    } else if (anyFailed) {
+      toast('No layer below to use as mask', 'err');
+    }
+  }
+
+  function cleanupClipsForDeletedElement(ab, deletedId) {
+    if (!ab) return;
+    const deletedFromMaster = ab.elements.find(e => e.id === deletedId)?._fromMaster;
+    ab.elements.forEach(other => {
+      if (other.clippedBy === deletedId || (deletedFromMaster && other.clippedBy === deletedFromMaster)) {
+        delete other.clippedBy;
+      }
+    });
+  }
+
+  // Returns SVG markup for the mask shape, sized to fit the mask element's
+  // bounding box. The result is the contents of a <clipPath> element.
+  // Coordinates are in the clipped element's local space (origin at top-left,
+  // sized to clipped element's w/h), so the mask appears WHERE the mask
+  // element is relative to the clipped layer.
+  function getMaskSvgContent(maskEl, clipped) {
+    const offsetX = maskEl.x - clipped.x;
+    const offsetY = maskEl.y - clipped.y;
+    const w = maskEl.w;
+    const h = maskEl.h;
+
+    if (maskEl.type === 'shape') {
+      const def = SHAPES[maskEl.shape];
+      if (def && def.svg) {
+        const sx = w / 24, sy = h / 24;
+        return `<g transform="translate(${offsetX},${offsetY}) scale(${sx},${sy})">${def.svg}</g>`;
+      }
+      return `<rect x="${offsetX}" y="${offsetY}" width="${w}" height="${h}"/>`;
+    }
+    if (maskEl.type === 'path' && maskEl.points && maskEl.points.length) {
+      const cmds = maskEl.points.map((p, i) => (i === 0 ? 'M' : 'L') + (offsetX + p.x * w) + ',' + (offsetY + p.y * h));
+      const d = cmds.join(' ') + (maskEl.closed ? ' Z' : '');
+      return `<path d="${d}"/>`;
+    }
+    return `<rect x="${offsetX}" y="${offsetY}" width="${w}" height="${h}"/>`;
+  }
+
 
   // Smart Layout: when true, every new artboard pings /api/layout for a Gemini-designed
   // arrangement instead of just proportionally fitting. Falls back silently to proportional
@@ -2220,13 +2336,37 @@ const App = (function(){
     node.style.left = el.x + 'px'; node.style.top = el.y + 'px';
     node.style.width = el.w + 'px'; node.style.height = el.h + 'px';
     node.style.opacity = el.opacity;
-    node.style.display = el.visible === false ? 'none' : 'block';
+    // Hide if explicitly invisible, OR if this element is acting as a mask
+    // base with clipBaseHidden — its silhouette is still used for clipping
+    // children, but its own fill/stroke isn't drawn.
+    const usedAsMask = isUsedAsMask(ab, el);
+    const baseHidden = usedAsMask && el.clipBaseHidden;
+    node.style.display = (el.visible === false || baseHidden) ? 'none' : 'block';
     node.style.transform = `rotate(${el.rotation||0}deg)`;
     if (el.blendMode && el.blendMode !== 'normal') {
       node.style.mixBlendMode = el.blendMode;
     }
     if (el.filter) node.style.filter = el.filter;
     if (el.outline) node.style.outline = el.outline;
+
+    // If this element is clipped by another, apply CSS clip-path via inline SVG
+    if (el.clippedBy) {
+      const maskEl = findMaskElement(ab, el.clippedBy);
+      if (maskEl) {
+        const maskSvgContent = getMaskSvgContent(maskEl, el);
+        // We use a data: URI inline SVG referenced by clip-path. The mask SVG
+        // is positioned in the clipped element's coordinate space.
+        const clipId = 'clip-' + el.id;
+        const svgInline = `<svg xmlns="http://www.w3.org/2000/svg" width="${el.w}" height="${el.h}" style="position:absolute;width:0;height:0;pointer-events:none"><defs><clipPath id="${clipId}">${maskSvgContent}</clipPath></defs></svg>`;
+        node.insertAdjacentHTML('afterbegin', svgInline);
+        node.style.clipPath = `url(#${clipId})`;
+        node.style.webkitClipPath = `url(#${clipId})`;
+        if (el.clipInvert) {
+          // Inverted clipping: harder with clip-path; use a path with even-odd fill rule
+          // For now, leave as a future enhancement — flag is preserved in data
+        }
+      }
+    }
 
     if (el.type === 'text') {
       const t = document.createElement('div');
@@ -3078,7 +3218,34 @@ const App = (function(){
         <div class="prop-row"><label>Width</label><input type="number" data-prop="strokeWidth" value="${el.strokeWidth||2}" /></div>`;
     }
 
-    // Stock-photo attribution block (shown when this element came from a stock source)
+    // Mask section — shown when this layer is clipped or used as a mask base
+    const inspectorAb = state.artboards.find(a => a.elements.includes(el));
+    const elIsClipped = !!el.clippedBy;
+    const elIsMaskBase = inspectorAb && isUsedAsMask(inspectorAb, el);
+    if (elIsClipped || elIsMaskBase) {
+      const maskedRefName = elIsClipped
+        ? (findMaskElement(inspectorAb, el.clippedBy)?.name || 'Layer below')
+        : null;
+      const clippedChildrenCount = elIsMaskBase
+        ? clippedElementsOf(inspectorAb, el).length
+        : 0;
+      html += `
+        <div class="prop-section-title"><span>Mask</span><span class="num">CLIP</span></div>
+        <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;color:var(--text-2);line-height:1.6;padding:8px 0">
+          ${elIsClipped ? `<div>Clipped by: <span style="color:var(--signal)">${escapeHtml(maskedRefName)}</span></div>` : ''}
+          ${elIsMaskBase ? `<div>Masking ${clippedChildrenCount} layer${clippedChildrenCount === 1 ? '' : 's'} above</div>` : ''}
+        </div>
+        ${elIsClipped ? `<button class="btn btn-sm btn-block" data-act-mask="release">${ic('scissors')} Release clipping mask</button>` : ''}
+        ${elIsMaskBase ? `
+          <div class="prop-row"><label>Hide mask base</label>
+            <input type="checkbox" data-prop-bool="clipBaseHidden" ${el.clipBaseHidden ? 'checked' : ''} />
+          </div>
+        ` : ''}
+        ${!elIsClipped && !elIsMaskBase ? `<button class="btn btn-sm btn-block" data-act-mask="create">${ic('scissors')} Use as clipping mask (Cmd+Alt+G)</button>` : ''}
+      `;
+    }
+
+
     if (el.attribution && el.attribution.source) {
       const a = el.attribution;
       html += `
@@ -3124,6 +3291,23 @@ const App = (function(){
         renderWorld(); renderProperties(); pushHistory();
       };
     });
+    // Mask inspector buttons
+    $$('[data-act-mask]', body).forEach(b => {
+      b.onclick = () => {
+        toggleClippingMaskForSelected();
+        // toggleClippingMaskForSelected calls pushHistory + renderAll already
+      };
+    });
+    // Boolean prop checkboxes (clipBaseHidden, etc.)
+    $$('[data-prop-bool]', body).forEach(input => {
+      const prop = input.dataset.propBool;
+      input.addEventListener('change', () => {
+        sel.forEach(e => { e[prop] = input.checked; });
+        const ab = state.artboards.find(a => a.elements.includes(sel[0]));
+        if (ab && ab.isMaster) syncFromMaster();
+        pushHistory(); renderAll();
+      });
+    });
   }
 
   function replaceImage() {
@@ -3162,9 +3346,12 @@ const App = (function(){
       else if (el.type === 'line') thumbHtml = ic('grip-lines');
       else if (el.type === 'path') thumbHtml = ic('bezier-curve');
       const roleBadge = el.role ? `<span class="layer-role">${el.role.slice(0,3).toUpperCase()}</span>` : '';
+      const clippedIcon = el.clippedBy ? `<span class="layer-clip-arrow" title="Clipped to layer below">${ic('arrow-down')}</span>` : '';
+      const maskBadge = isUsedAsMask(ab, el) ? `<span class="layer-mask-badge" title="Used as clipping mask">MASK</span>` : '';
+      if (el.clippedBy) item.classList.add('clipped');
       item.innerHTML = `
         <div class="layer-thumb">${thumbHtml}</div>
-        ${roleBadge}
+        ${clippedIcon}${roleBadge}${maskBadge}
         <div class="layer-name">${escapeHtml(el.name||defaultName(el))}</div>
         <div class="layer-actions">
           <button data-act="visible" title="Visibility">${el.visible===false?ic('eye-slash'):ic('eye')}</button>
@@ -3471,17 +3658,80 @@ const App = (function(){
     ctx.restore();
   }
 
-  async function drawElementToCtx(ctx, el) {
+  async function drawElementToCtx(ctx, el, ab) {
+    // If this element is clipped, render to an offscreen canvas first, mask
+    // it there, then composite the result onto the main canvas. This avoids
+    // any interaction with content already drawn on the main canvas.
+    if (el.clippedBy && ab) {
+      const maskEl = findMaskElement(ab, el.clippedBy);
+      if (maskEl) {
+        try {
+          // Offscreen canvas sized to clipped element bounds
+          const off = document.createElement('canvas');
+          // Use a buffer slightly larger than el to handle rotation; for now,
+          // size to the element's own box (rotation effects on clipped layers
+          // are an edge case we can refine later).
+          off.width = Math.max(1, Math.round(el.w));
+          off.height = Math.max(1, Math.round(el.h));
+          const offCtx = off.getContext('2d');
+
+          // Draw the unclipped element content onto the offscreen canvas at
+          // local origin. We synthesize a "local" el clone with x/y=0 and
+          // call drawElementToCtxRaw which does the inner draw without the
+          // clipping wrapper.
+          offCtx.save();
+          await drawElementInnerToCtx(offCtx, el);
+          offCtx.restore();
+
+          // Now apply mask: paint mask shape with destination-in compositing
+          const maskSvg = getMaskSvgContent(maskEl, el);
+          const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" width="${off.width}" height="${off.height}" viewBox="0 0 ${off.width} ${off.height}"><g fill="white">${maskSvg}</g></svg>`;
+          const blob = new Blob([svgStr], { type: 'image/svg+xml' });
+          const url = URL.createObjectURL(blob);
+          try {
+            const maskImg = await loadImage(url);
+            offCtx.globalCompositeOperation = 'destination-in';
+            offCtx.drawImage(maskImg, 0, 0, off.width, off.height);
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+
+          // Composite onto main canvas at the element's position
+          ctx.save();
+          ctx.globalAlpha = el.opacity || 1;
+          if (el.blendMode && el.blendMode !== 'normal') {
+            ctx.globalCompositeOperation = el.blendMode;
+          }
+          ctx.translate(el.x + el.w/2, el.y + el.h/2);
+          if (el.rotation) ctx.rotate(el.rotation*Math.PI/180);
+          ctx.translate(-el.w/2, -el.h/2);
+          ctx.drawImage(off, 0, 0);
+          ctx.restore();
+          return;
+        } catch (e) {
+          console.warn('[mask] canvas clip failed, drawing without clip', e);
+          // Fall through to unclipped draw
+        }
+      }
+    }
+
+    // Standard (unclipped) draw path
     ctx.save();
     ctx.globalAlpha = el.opacity || 1;
     if (el.blendMode && el.blendMode !== 'normal') {
-      // Map common Photoshop modes (already CSS-compatible names)
       ctx.globalCompositeOperation = el.blendMode;
     }
     ctx.translate(el.x + el.w/2, el.y + el.h/2);
     if (el.rotation) ctx.rotate(el.rotation*Math.PI/180);
     ctx.translate(-el.w/2, -el.h/2);
+    await drawElementInnerToCtx(ctx, el);
+    ctx.restore();
+  }
 
+  // Inner draw — assumes ctx is already positioned at element's local origin
+  // with dimensions (el.w, el.h). Does NOT call save/restore or apply
+  // transforms; that's the caller's responsibility.
+  async function drawElementInnerToCtx(ctx, el) {
     if (el.type === 'shape') {
       const def = SHAPES[el.shape];
       if (def) {
@@ -3539,7 +3789,6 @@ const App = (function(){
       if (el.closed) { ctx.closePath(); if(el.fill && el.fill!=='none') ctx.fill(); }
       ctx.stroke();
     }
-    ctx.restore();
   }
 
   function wrapText(ctx, text, maxWidth) {
@@ -3585,7 +3834,12 @@ const App = (function(){
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, ab.width, ab.height); ctx.clip();
     const els = [...ab.elements].sort((a,b)=>a.z-b.z);
-    for (const el of els) { if (el.visible === false) continue; await drawElementToCtx(ctx, el); }
+    for (const el of els) {
+      if (el.visible === false) continue;
+      // Skip rendering a mask base if it's marked as hidden
+      if (el.clipBaseHidden && isUsedAsMask(ab, el)) continue;
+      await drawElementToCtx(ctx, el, ab);
+    }
     ctx.restore();
     return c;
   }
@@ -3650,11 +3904,40 @@ const App = (function(){
   }
 
   function showElementContextMenu(x, y) {
+    const sel = selectedElements();
+    const hasClipped = sel.some(e => e.clippedBy);
+    const ab = activeArtboard();
+    const anyUsedAsMask = ab && sel.some(e => isUsedAsMask(ab, e));
+    const maskItems = [];
+    if (sel.length > 0) {
+      maskItems.push({
+        label: hasClipped ? 'Release clipping mask' : 'Create clipping mask',
+        icon: hasClipped ? 'scissors' : 'scissors',
+        kbd: '⌘⌥G',
+        action: toggleClippingMaskForSelected,
+      });
+      // If any selected element is acting as a mask base, offer hide/show toggle
+      if (anyUsedAsMask) {
+        const baseHidden = sel.some(e => e.clipBaseHidden && isUsedAsMask(ab, e));
+        maskItems.push({
+          label: baseHidden ? 'Show mask base' : 'Hide mask base (silhouette only)',
+          icon: baseHidden ? 'eye' : 'eye-slash',
+          action: () => {
+            sel.forEach(e => {
+              if (isUsedAsMask(ab, e)) e.clipBaseHidden = !e.clipBaseHidden;
+            });
+            pushHistory(); renderAll();
+          },
+        });
+      }
+    }
     showContextMenu(x, y, [
       {label:'Copy', icon:'copy', kbd:'⌘C', action: copySelected},
       {label:'Paste', icon:'clipboard', kbd:'⌘V', action: pasteClipboard},
       {label:'Duplicate', icon:'copy', kbd:'⌘D', action: ()=>{copySelected(); pasteClipboard();}},
       {sep:true},
+      ...maskItems,
+      ...(maskItems.length ? [{sep:true}] : []),
       {label:'Bring forward', icon:'arrow-up', action: ()=>changeZ(1)},
       {label:'Send backward', icon:'arrow-down', action: ()=>changeZ(-1)},
       {label:'Bring to front', icon:'arrow-up', action: ()=>changeZ('top')},
@@ -4089,6 +4372,12 @@ const App = (function(){
       if (cmd && e.key === 'v') { e.preventDefault(); pasteClipboard(); return; }
       if (cmd && e.key === 'd') { e.preventDefault(); copySelected(); pasteClipboard(); return; }
       if (cmd && e.key === 'a') { e.preventDefault(); const ab = activeArtboard(); if (ab) state.selectedElementIds = ab.elements.map(e=>e.id); renderAll(); return; }
+      // Photoshop shortcut: Cmd/Ctrl + Alt + G = toggle clipping mask
+      if (cmd && e.altKey && (e.key === 'g' || e.key === 'G')) {
+        e.preventDefault();
+        toggleClippingMaskForSelected();
+        return;
+      }
       if (cmd && e.key === 's') { e.preventDefault(); persistProject(); toast('Saved','ok','PROJECT.SAVED'); return; }
       if (cmd && e.key === '0') { e.preventDefault(); zoomFit(); return; }
       if (cmd && e.key === '+') { e.preventDefault(); zoomBy(0.2); return; }
