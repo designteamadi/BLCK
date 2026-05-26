@@ -2867,29 +2867,75 @@ const App = (function(){
       t.textContent = el.text || 'Text';
       node.appendChild(t);
     } else if (el.type === 'image') {
+      // Wrap the <img> in an inner div so we can position it precisely
+      // (needed when the image is clipped by an image-mask and we want the
+      // image visible only inside the mask's silhouette, even if the mask
+      // sits at a different position on the artboard).
       const img = document.createElement('img');
       img.src = el.src; img.draggable = false;
       if (el.objectFit) img.style.objectFit = el.objectFit;
       if (el.radius) img.style.borderRadius = el.radius + 'px';
       if (el.filter) img.style.filter = el.filter;
-      // If this image is clipped, apply clip-path directly to the <img>.
-      // We use the global SVG defs container for the clipPath shape.
+
       if (el.clippedBy) {
         const maskEl = findMaskElement(ab, el.clippedBy);
         if (maskEl) {
-          const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
-          ensureGlobalClipPath(clipId, maskEl, el);
-          const url = `url(#${clipId})`;
-          img.style.clipPath = url;
-          img.style.webkitClipPath = url;
-          console.log('[clip-render-img]', {
-            elementId: el.id,
-            elementBounds: { x: el.x, y: el.y, w: el.w, h: el.h },
-            maskBounds: { x: maskEl.x, y: maskEl.y, w: maskEl.w, h: maskEl.h },
-            clipId,
-            globalSvgInDom: !!document.getElementById('blck-global-clip-svg'),
-            clipPathExists: !!document.querySelector(`#${clipId}`),
-          });
+          if (maskEl.type === 'image' && maskEl.src) {
+            // RASTER MASK PATH — use CSS mask-image which is rock-solid and
+            // works in every modern browser. The mask PNG's alpha channel
+            // directly determines visibility.
+            //
+            // Position the image element so it covers the MASK's bounding
+            // box, then use the mask PNG as the visibility map. The result:
+            // image is visible only where mask has opaque pixels, at the
+            // mask's position on the artboard.
+            //
+            // We resize/reposition the wrapper node to match the mask's
+            // bounds, and place the original image content inside, offset
+            // so the user's chosen image content shows in the correct part
+            // of the mask shape.
+            const offsetX = el.x - maskEl.x;
+            const offsetY = el.y - maskEl.y;
+            // Reposition the wrapper to the mask's location & size
+            node.style.left = maskEl.x + 'px';
+            node.style.top = maskEl.y + 'px';
+            node.style.width = maskEl.w + 'px';
+            node.style.height = maskEl.h + 'px';
+            // Apply the PNG as a CSS mask. Cover-fit the mask to its own
+            // bounds (the mask PNG should already be cropped to its content
+            // by rasterize, so this just fills the wrapper).
+            const maskUrl = `url("${maskEl.src.replace(/"/g, '\\"')}")`;
+            node.style.maskImage = maskUrl;
+            node.style.webkitMaskImage = maskUrl;
+            node.style.maskSize = '100% 100%';
+            node.style.webkitMaskSize = '100% 100%';
+            node.style.maskRepeat = 'no-repeat';
+            node.style.webkitMaskRepeat = 'no-repeat';
+            // Position the image within the wrapper so its original content
+            // appears in the correct place relative to the mask
+            img.style.position = 'absolute';
+            img.style.left = offsetX + 'px';
+            img.style.top = offsetY + 'px';
+            img.style.width = el.w + 'px';
+            img.style.height = el.h + 'px';
+            console.log('[mask-image]', {
+              elementId: el.id, maskId: maskEl.id,
+              imageBounds: { x: el.x, y: el.y, w: el.w, h: el.h },
+              maskBounds: { x: maskEl.x, y: maskEl.y, w: maskEl.w, h: maskEl.h },
+              offset: { x: offsetX, y: offsetY },
+              maskSrcPreview: maskEl.src.slice(0, 60),
+            });
+          } else {
+            // VECTOR MASK PATH — use clip-path with SVG defs (legacy, still
+            // unreliable for some shapes but kept as fallback for non-image
+            // masks). For shape masks, recommend the user rasterize the
+            // shape first to get the mask-image rendering.
+            const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
+            ensureGlobalClipPath(clipId, maskEl, el);
+            const url = `url(#${clipId})`;
+            img.style.clipPath = url;
+            img.style.webkitClipPath = url;
+          }
         }
       }
       node.appendChild(img);
