@@ -1979,6 +1979,54 @@ const App = (function(){
   // Rotation/opacity are baked into pixels; the new element resets them.
   // Renders at 2x for crisp output on high-DPI displays and exports.
 
+  // Scans a canvas and returns the tight bounding box of non-transparent
+  // pixels. Returns null if the canvas is fully transparent.
+  // Result: { canvas: croppedCanvas, offsetX, offsetY } where offsetX/Y is
+  // the position of the cropped content within the original canvas (in
+  // original canvas pixels).
+  function trimTransparent(srcCanvas) {
+    const w = srcCanvas.width, h = srcCanvas.height;
+    if (w === 0 || h === 0) return null;
+    const ctx = srcCanvas.getContext('2d');
+    let imgData;
+    try {
+      imgData = ctx.getImageData(0, 0, w, h);
+    } catch (e) {
+      // Canvas may be tainted; skip trimming and return as-is
+      console.warn('[trim] getImageData failed, returning untrimmed', e);
+      return null;
+    }
+    const data = imgData.data;
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    // Scan row by row, looking at the alpha channel (every 4th byte)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const alpha = data[(y * w + x) * 4 + 3];
+        if (alpha > 0) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < minX || maxY < minY) {
+      // Fully transparent
+      return null;
+    }
+    const cropW = maxX - minX + 1;
+    const cropH = maxY - minY + 1;
+    // If the crop is the entire canvas, no trimming needed
+    if (cropW === w && cropH === h) {
+      return { canvas: srcCanvas, offsetX: 0, offsetY: 0, trimmed: false };
+    }
+    const cropped = document.createElement('canvas');
+    cropped.width = cropW;
+    cropped.height = cropH;
+    cropped.getContext('2d').drawImage(srcCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+    return { canvas: cropped, offsetX: minX, offsetY: minY, trimmed: true };
+  }
+
   async function rasterizeElement(el) {
     if (!el) return false;
     if (el.type === 'image') {
@@ -2013,13 +2061,32 @@ const App = (function(){
       await drawElementInnerToCtx(ctx, local);
       ctx.restore();
 
-      const dataUrl = canvas.toDataURL('image/png');
+      // Trim transparent edges so the element's bounding box hugs the actual
+      // pixel content. The new x/y is adjusted so the visible content stays
+      // in the same place on the artboard.
+      const trim = trimTransparent(canvas);
+      let finalCanvas = canvas;
+      let newX = el.x, newY = el.y, newW = el.w, newH = el.h;
+      if (trim && trim.trimmed) {
+        finalCanvas = trim.canvas;
+        // Convert offsets from rasterized pixel space back to artboard space
+        newX = el.x + trim.offsetX / scale;
+        newY = el.y + trim.offsetY / scale;
+        newW = trim.canvas.width / scale;
+        newH = trim.canvas.height / scale;
+      } else if (!trim) {
+        // Fully transparent — nothing to rasterize meaningfully
+        toast('Nothing visible to rasterize', '', 'RASTER');
+        return false;
+      }
+
+      const dataUrl = finalCanvas.toDataURL('image/png');
 
       // Replace element properties in place
       const oldName = el.name;
       // Clear properties not relevant to image
       for (const k of Object.keys(el)) {
-        if (!['id', 'x', 'y', 'w', 'h', 'z', 'visible', 'locked', '_fromMaster'].includes(k)) {
+        if (!['id', 'z', 'visible', 'locked', '_fromMaster'].includes(k)) {
           delete el[k];
         }
       }
@@ -2028,12 +2095,13 @@ const App = (function(){
       el.objectFit = 'contain';
       el.opacity = 1;
       el.rotation = 0;
+      el.x = newX; el.y = newY; el.w = newW; el.h = newH;
       el.name = oldName + ' (raster)';
 
       const ab = findArtboardOfElement(el);
       if (ab && ab.isMaster) syncFromMaster();
       pushHistory(); renderAll();
-      toast('Rasterized', 'ok', 'RASTER');
+      toast(trim?.trimmed ? 'Rasterized + trimmed' : 'Rasterized', 'ok', 'RASTER');
       return true;
     } catch (err) {
       console.error('[rasterize]', err);
@@ -2161,15 +2229,31 @@ const App = (function(){
         if (child.visible === false) continue;
         await drawElementToCtx(ctx, child, ab);
       }
-      const dataUrl = canvas.toDataURL('image/png');
 
-      // Replace the group with an image at the same bounds
+      // Trim transparent edges
+      const trim = trimTransparent(canvas);
+      let finalCanvas = canvas;
+      let newX = group.x, newY = group.y, newW = group.w, newH = group.h;
+      if (trim && trim.trimmed) {
+        finalCanvas = trim.canvas;
+        newX = group.x + trim.offsetX / scale;
+        newY = group.y + trim.offsetY / scale;
+        newW = trim.canvas.width / scale;
+        newH = trim.canvas.height / scale;
+      } else if (!trim) {
+        toast('Group has nothing visible to rasterize', '', 'GROUP.RASTER');
+        return false;
+      }
+
+      const dataUrl = finalCanvas.toDataURL('image/png');
+
+      // Replace the group with an image at the trimmed bounds
       const newImg = {
         id: group.id,
         type: 'image',
         src: dataUrl,
         objectFit: 'contain',
-        x: group.x, y: group.y, w: group.w, h: group.h,
+        x: newX, y: newY, w: newW, h: newH,
         rotation: 0, opacity: 1, visible: true, locked: false,
         z: group.z,
         name: group.name + ' (raster)',
