@@ -2184,17 +2184,14 @@ const App = (function(){
     if (maskEl.type === 'shape') {
       const def = SHAPES[maskEl.shape];
       if (def && def.svg) {
-        // Wrap shape SVG in a group with positioning transform
+        // Wrap shape SVG in a group with positioning transform.
+        // Set innerHTML on the <g> element directly — because the <g> is in
+        // the SVG namespace, browsers parse its innerHTML as SVG content.
+        // (Using DOMParser + cloneNode loses the SVG namespace when nodes
+        // are appended across documents in some browsers.)
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('transform', `translate(${offsetX}, ${offsetY}) scale(${w/24}, ${h/24})`);
-        // Parse the shape SVG into actual DOM nodes so the clipPath can use them
-        const parser = new DOMParser();
-        const parsed = parser.parseFromString(
-          `<svg xmlns="${NS}">${def.svg}</svg>`, 'image/svg+xml'
-        );
-        Array.from(parsed.documentElement.childNodes).forEach(child => {
-          g.appendChild(child.cloneNode(true));
-        });
+        g.innerHTML = def.svg;
         cp.appendChild(g);
       } else {
         // Fallback rect
@@ -2511,19 +2508,50 @@ const App = (function(){
       t.textContent = el.text || 'Text';
       node.appendChild(t);
     } else if (el.type === 'image') {
-      const img = document.createElement('img');
-      img.src = el.src; img.draggable = false;
-      if (el.objectFit) img.style.objectFit = el.objectFit;
-      if (el.radius) img.style.borderRadius = el.radius + 'px';
-      if (el.filter) img.style.filter = el.filter;
-      // Also apply clip-path to the inner img — this is the most reliable
-      // location since the img is the actual visual content and has no
-      // transform of its own.
-      if (clipPathUrl) {
-        img.style.clipPath = clipPathUrl;
-        img.style.webkitClipPath = clipPathUrl;
+      if (el.clippedBy) {
+        // CLIPPED IMAGE: render as inline SVG with the clipPath defined in
+        // the SAME SVG element. This bypasses cross-document CSS clip-path
+        // URL resolution issues that affect <img> elements in some browsers.
+        const ab2 = ab;
+        const maskEl2 = findMaskElement(ab2, el.clippedBy);
+        if (maskEl2) {
+          const offsetX = maskEl2.x - el.x;
+          const offsetY = maskEl2.y - el.y;
+          const mw = maskEl2.w, mh = maskEl2.h;
+          let maskInner = '';
+          if (maskEl2.type === 'shape' && SHAPES[maskEl2.shape]?.svg) {
+            maskInner = `<g transform="translate(${offsetX} ${offsetY}) scale(${mw/24} ${mh/24})">${SHAPES[maskEl2.shape].svg}</g>`;
+          } else if (maskEl2.type === 'path' && maskEl2.points?.length) {
+            const cmds = maskEl2.points.map((p,i)=>(i===0?'M':'L')+(offsetX+p.x*mw)+','+(offsetY+p.y*mh));
+            const d = cmds.join(' ') + (maskEl2.closed ? ' Z' : '');
+            maskInner = `<path d="${d}"/>`;
+          } else {
+            maskInner = `<rect x="${offsetX}" y="${offsetY}" width="${mw}" height="${mh}"/>`;
+          }
+          const localId = 'localclip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
+          const fit = el.objectFit === 'contain' ? 'xMidYMid meet'
+                    : el.objectFit === 'fill' ? 'none'
+                    : 'xMidYMid slice';  // cover
+          const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${el.w} ${el.h}" width="${el.w}" height="${el.h}" preserveAspectRatio="none"><defs><clipPath id="${localId}" clipPathUnits="userSpaceOnUse">${maskInner}</clipPath></defs><image href="${el.src}" x="0" y="0" width="${el.w}" height="${el.h}" preserveAspectRatio="${fit}" clip-path="url(#${localId})"/></svg>`;
+          node.innerHTML = svgStr;
+        } else {
+          // Mask reference broken — fall through to normal image render
+          const img = document.createElement('img');
+          img.src = el.src; img.draggable = false;
+          if (el.objectFit) img.style.objectFit = el.objectFit;
+          if (el.radius) img.style.borderRadius = el.radius + 'px';
+          if (el.filter) img.style.filter = el.filter;
+          node.appendChild(img);
+        }
+      } else {
+        // UNCLIPPED IMAGE: normal HTML <img>
+        const img = document.createElement('img');
+        img.src = el.src; img.draggable = false;
+        if (el.objectFit) img.style.objectFit = el.objectFit;
+        if (el.radius) img.style.borderRadius = el.radius + 'px';
+        if (el.filter) img.style.filter = el.filter;
+        node.appendChild(img);
       }
-      node.appendChild(img);
     } else if (el.type === 'shape') {
       const def = SHAPES[el.shape];
       if (def) {
