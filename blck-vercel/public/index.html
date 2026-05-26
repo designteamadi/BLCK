@@ -674,7 +674,7 @@
   <div class="top-rule">
     <div class="brand">
       <span class="blck">BLCK</span>
-      <span class="ver">v3.4 · RASTER+GROUP / DESIGN.STUDIO</span>
+      <span class="ver">v3.5 · MASKS+RASTER+GROUP / DESIGN.STUDIO</span>
     </div>
     <div class="top-spec">
       <button id="auth-status" class="auth-status" data-action="auth">
@@ -3662,15 +3662,39 @@ const App = (function(){
         <div class="prop-row"><label>Width</label><input type="number" data-prop="strokeWidth" value="${el.strokeWidth||2}" /></div>`;
     }
 
-    // Mask section disabled — clipping mask render didn't work reliably across
-    // browsers. Data model preserved (clippedBy, etc.) so existing designs aren't
-    // lost. Replaced with rasterize/group workflow which is more predictable.
-    /*
+    // Mask section — shown when this layer is clipped or used as a mask base.
+    // NOTE: visual rendering of clipped images is unreliable in the current
+    // implementation. Data model and controls are kept so designs preserve
+    // their clipping relationships. The Rasterize / Group features are the
+    // recommended workflow until clipping mask render is rewritten.
     const inspectorAb = state.artboards.find(a => a.elements.includes(el));
     const elIsClipped = !!el.clippedBy;
     const elIsMaskBase = inspectorAb && isUsedAsMask(inspectorAb, el);
-    if (elIsClipped || elIsMaskBase) { ... }
-    */
+    if (elIsClipped || elIsMaskBase) {
+      const maskRef = elIsClipped ? findMaskElement(inspectorAb, el.clippedBy) : null;
+      const maskedRefName = maskRef?.name || (maskRef ? defaultName(maskRef) : 'Layer below');
+      const maskRefHidden = !!maskRef?.clipBaseHidden;
+      const clippedChildrenCount = elIsMaskBase
+        ? clippedElementsOf(inspectorAb, el).length
+        : 0;
+      html += `
+        <div class="prop-section-title"><span>Mask</span><span class="num">CLIP</span></div>
+        <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;color:var(--text-2);line-height:1.6;padding:8px 0">
+          ${elIsClipped ? `<div>Clipped by: <span style="color:var(--signal)">${escapeHtml(maskedRefName)}</span></div>` : ''}
+          ${elIsMaskBase ? `<div>Masking ${clippedChildrenCount} layer${clippedChildrenCount === 1 ? '' : 's'} above</div>` : ''}
+        </div>
+        ${elIsClipped ? `
+          <button class="btn btn-sm btn-block" data-act-mask="release">${ic('scissors')} Release clipping mask</button>
+          <button class="btn btn-sm btn-block" style="margin-top:6px" data-act-mask="toggle-base-hidden">${ic(maskRefHidden ? 'eye' : 'eye-slash')} ${maskRefHidden ? 'Show mask shape' : 'Hide mask shape'}</button>
+        ` : ''}
+        ${elIsMaskBase ? `
+          <div class="prop-row"><label>Hide mask base</label>
+            <input type="checkbox" data-prop-bool="clipBaseHidden" ${el.clipBaseHidden ? 'checked' : ''} />
+          </div>
+        ` : ''}
+        ${!elIsClipped && !elIsMaskBase ? `<button class="btn btn-sm btn-block" data-act-mask="create">${ic('scissors')} Use as clipping mask (Cmd+Alt+G)</button>` : ''}
+      `;
+    }
 
 
     if (el.attribution && el.attribution.source) {
@@ -3841,6 +3865,7 @@ const App = (function(){
       item.className = 'layer-item' + (state.selectedElementIds.includes(el.id)?' selected':'');
       item.draggable = true; item.dataset.layerId = el.id;
       if (depth > 0) item.classList.add('layer-child');
+      if (el.clippedBy) item.classList.add('clipped');
       let thumbHtml = '';
       if (el.type === 'image') thumbHtml = `<img src="${el.src}" />`;
       else if (el.type === 'text') thumbHtml = ic('font');
@@ -3850,11 +3875,13 @@ const App = (function(){
       else if (el.type === 'group') thumbHtml = ic('layer-group');
       const roleBadge = el.role ? `<span class="layer-role">${el.role.slice(0,3).toUpperCase()}</span>` : '';
       const groupBadge = el.type === 'group' ? `<span class="layer-group-badge" title="Group">GROUP</span>` : '';
+      const clippedIcon = el.clippedBy ? `<span class="layer-clip-arrow" title="Clipped to layer below">${ic('arrow-down')}</span>` : '';
+      const maskBadge = isUsedAsMask(ab, el) ? `<span class="layer-mask-badge" title="Used as clipping mask">MASK</span>` : '';
       const indent = depth > 0 ? `<span class="layer-indent"></span>` : '';
       item.innerHTML = `
         ${indent}
         <div class="layer-thumb">${thumbHtml}</div>
-        ${roleBadge}${groupBadge}
+        ${clippedIcon}${roleBadge}${groupBadge}${maskBadge}
         <div class="layer-name">${escapeHtml(el.name||defaultName(el))}</div>
         <div class="layer-actions">
           <button data-act="visible" title="Visibility">${el.visible===false?ic('eye-slash'):ic('eye')}</button>
@@ -4412,6 +4439,9 @@ const App = (function(){
     const rasterizable = sel.filter(e => e.type !== 'image').length > 0;
     const hasGroup = sel.some(e => e.type === 'group');
     const canGroup = sel.length >= 2;
+    const hasClipped = sel.some(e => e.clippedBy);
+    const anyUsedAsMask = ab && sel.some(e => isUsedAsMask(ab, e));
+
     const transformItems = [];
     if (rasterizable) {
       transformItems.push({
@@ -4437,11 +4467,36 @@ const App = (function(){
         action: ungroupSelected,
       });
     }
+
+    const maskItems = [];
+    if (sel.length > 0) {
+      maskItems.push({
+        label: hasClipped ? 'Release clipping mask' : 'Create clipping mask',
+        icon: 'scissors',
+        kbd: '⌘⌥G',
+        action: toggleClippingMaskForSelected,
+      });
+      if (anyUsedAsMask) {
+        const baseHidden = sel.some(e => e.clipBaseHidden && isUsedAsMask(ab, e));
+        maskItems.push({
+          label: baseHidden ? 'Show mask base' : 'Hide mask base (silhouette only)',
+          icon: baseHidden ? 'eye' : 'eye-slash',
+          action: () => {
+            sel.forEach(e => {
+              if (isUsedAsMask(ab, e)) e.clipBaseHidden = !e.clipBaseHidden;
+            });
+            pushHistory(); renderAll();
+          },
+        });
+      }
+    }
+
     showContextMenu(x, y, [
       {label:'Copy', icon:'copy', kbd:'⌘C', action: copySelected},
       {label:'Paste', icon:'clipboard', kbd:'⌘V', action: pasteClipboard},
       {label:'Duplicate', icon:'copy', kbd:'⌘D', action: ()=>{copySelected(); pasteClipboard();}},
       ...(transformItems.length ? [{sep:true}, ...transformItems] : []),
+      ...(maskItems.length ? [{sep:true}, ...maskItems] : []),
       {sep:true},
       {label:'Bring forward', icon:'arrow-up', action: ()=>changeZ(1)},
       {label:'Send backward', icon:'arrow-down', action: ()=>changeZ(-1)},
@@ -4895,6 +4950,12 @@ const App = (function(){
         e.preventDefault();
         if (e.shiftKey) ungroupSelected();
         else groupSelected();
+        return;
+      }
+      // Clipping mask: Cmd/Ctrl + Alt + G (Photoshop shortcut)
+      if (cmd && e.altKey && (e.key === 'g' || e.key === 'G')) {
+        e.preventDefault();
+        toggleClippingMaskForSelected();
         return;
       }
       // Rasterize: Cmd/Ctrl + E
