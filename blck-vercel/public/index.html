@@ -2473,18 +2473,24 @@ const App = (function(){
     if (el.filter) node.style.filter = el.filter;
     if (el.outline) node.style.outline = el.outline;
 
-    // If this element is clipped by another, apply CSS clip-path via a
-    // GLOBAL SVG defs container. Using global defs (rather than inline per
-    // element) is critical for cross-browser reliability — Chrome and Safari
-    // are inconsistent about resolving clip-path: url(#id) when the SVG
-    // defining the clipPath is nested inside the element being clipped.
+    // If this element is clipped by another, build the clipPath in the
+    // global SVG defs. We apply the clip-path CSS to the inner content
+    // (img, svg, text) rather than the wrapper, because the wrapper has
+    // `transform: rotate(...)` which interacts poorly with clip-path on
+    // the same element in some browsers (image escapes the clip).
+    let clipPathUrl = null;
     if (el.clippedBy) {
       const maskEl = findMaskElement(ab, el.clippedBy);
       if (maskEl) {
         const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
         ensureGlobalClipPath(clipId, maskEl, el);
-        node.style.clipPath = `url(#${clipId})`;
-        node.style.webkitClipPath = `url(#${clipId})`;
+        clipPathUrl = `url(#${clipId})`;
+        // Also belt-and-suspenders: apply to the wrapper (works in modern browsers)
+        node.style.clipPath = clipPathUrl;
+        node.style.webkitClipPath = clipPathUrl;
+        // Ensure inner content can't escape — clip-path implies overflow:hidden
+        // but some content (text with absolute children) may need it explicitly
+        node.style.overflow = 'hidden';
       }
     }
 
@@ -2510,6 +2516,13 @@ const App = (function(){
       if (el.objectFit) img.style.objectFit = el.objectFit;
       if (el.radius) img.style.borderRadius = el.radius + 'px';
       if (el.filter) img.style.filter = el.filter;
+      // Also apply clip-path to the inner img — this is the most reliable
+      // location since the img is the actual visual content and has no
+      // transform of its own.
+      if (clipPathUrl) {
+        img.style.clipPath = clipPathUrl;
+        img.style.webkitClipPath = clipPathUrl;
+      }
       node.appendChild(img);
     } else if (el.type === 'shape') {
       const def = SHAPES[el.shape];
@@ -3363,9 +3376,9 @@ const App = (function(){
     const elIsClipped = !!el.clippedBy;
     const elIsMaskBase = inspectorAb && isUsedAsMask(inspectorAb, el);
     if (elIsClipped || elIsMaskBase) {
-      const maskedRefName = elIsClipped
-        ? (findMaskElement(inspectorAb, el.clippedBy)?.name || 'Layer below')
-        : null;
+      const maskRef = elIsClipped ? findMaskElement(inspectorAb, el.clippedBy) : null;
+      const maskedRefName = maskRef?.name || (maskRef ? defaultName(maskRef) : 'Layer below');
+      const maskRefHidden = !!maskRef?.clipBaseHidden;
       const clippedChildrenCount = elIsMaskBase
         ? clippedElementsOf(inspectorAb, el).length
         : 0;
@@ -3375,7 +3388,10 @@ const App = (function(){
           ${elIsClipped ? `<div>Clipped by: <span style="color:var(--signal)">${escapeHtml(maskedRefName)}</span></div>` : ''}
           ${elIsMaskBase ? `<div>Masking ${clippedChildrenCount} layer${clippedChildrenCount === 1 ? '' : 's'} above</div>` : ''}
         </div>
-        ${elIsClipped ? `<button class="btn btn-sm btn-block" data-act-mask="release">${ic('scissors')} Release clipping mask</button>` : ''}
+        ${elIsClipped ? `
+          <button class="btn btn-sm btn-block" data-act-mask="release">${ic('scissors')} Release clipping mask</button>
+          <button class="btn btn-sm btn-block" style="margin-top:6px" data-act-mask="toggle-base-hidden">${ic(maskRefHidden ? 'eye' : 'eye-slash')} ${maskRefHidden ? 'Show mask shape' : 'Hide mask shape'}</button>
+        ` : ''}
         ${elIsMaskBase ? `
           <div class="prop-row"><label>Hide mask base</label>
             <input type="checkbox" data-prop-bool="clipBaseHidden" ${el.clipBaseHidden ? 'checked' : ''} />
@@ -3475,8 +3491,23 @@ const App = (function(){
     // Mask inspector buttons
     $$('[data-act-mask]', body).forEach(b => {
       b.onclick = () => {
+        const act = b.dataset.actMask;
+        if (act === 'toggle-base-hidden') {
+          // Find the mask base for the currently selected clipped layer(s)
+          const ab = activeArtboard(); if (!ab) return;
+          let changed = false;
+          for (const el of sel) {
+            if (!el.clippedBy) continue;
+            const maskEl = findMaskElement(ab, el.clippedBy);
+            if (!maskEl) continue;
+            maskEl.clipBaseHidden = !maskEl.clipBaseHidden;
+            changed = true;
+          }
+          if (changed) { pushHistory(); renderAll(); }
+          return;
+        }
+        // Default action: toggle create/release
         toggleClippingMaskForSelected();
-        // toggleClippingMaskForSelected calls pushHistory + renderAll already
       };
     });
     // Boolean prop checkboxes (clipBaseHidden, etc.)
