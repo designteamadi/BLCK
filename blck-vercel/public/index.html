@@ -398,6 +398,13 @@
     color:var(--signal);font-size:9px;margin-right:2px;transform:rotate(180deg)}
   .layer-mask-badge{font-family:var(--font-mono);font-size:8px;letter-spacing:0.12em;
     color:var(--ink);background:var(--signal);padding:2px 5px;margin-right:4px}
+  /* GROUPS */
+  .layer-item.layer-child{padding-left:24px}
+  .layer-indent{display:inline-block;width:14px;height:1px;flex-shrink:0}
+  .layer-group-badge{font-family:var(--font-mono);font-size:8px;letter-spacing:0.12em;
+    color:var(--text);background:var(--ink-3);padding:2px 5px;margin-right:4px;border:1px solid var(--line)}
+  .element.group-wrapper{outline:1px dashed var(--signal);outline-offset:-1px;background:transparent}
+  .element.group-wrapper:not(.selected){outline:1px dashed rgba(255,89,73,0.25)}
   .layer-actions{display:flex;gap:2px;opacity:0;transition:opacity .1s}
   .layer-item:hover .layer-actions{opacity:1}
   .layer-actions button{width:22px;height:22px;display:flex;align-items:center;justify-content:center;
@@ -667,7 +674,7 @@
   <div class="top-rule">
     <div class="brand">
       <span class="blck">BLCK</span>
-      <span class="ver">v3.3 · MASKS / DESIGN.STUDIO</span>
+      <span class="ver">v3.4 · RASTER+GROUP / DESIGN.STUDIO</span>
     </div>
     <div class="top-spec">
       <button id="auth-status" class="auth-status" data-action="auth">
@@ -1964,12 +1971,237 @@ const App = (function(){
     return el;
   }
 
+  // ============================================================
+  // RASTERIZE
+  // ============================================================
+  // Convert a vector element (text, shape, path, line) into a transparent
+  // PNG. The element type becomes 'image' with the data URL as src.
+  // Rotation/opacity are baked into pixels; the new element resets them.
+  // Renders at 2x for crisp output on high-DPI displays and exports.
+
+  async function rasterizeElement(el) {
+    if (!el) return false;
+    if (el.type === 'image') {
+      toast('Already rasterized', '', 'RASTER');
+      return false;
+    }
+    if (el.type === 'group') {
+      return rasterizeGroup(el);
+    }
+    try {
+      const scale = 2;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(el.w * scale));
+      canvas.height = Math.max(1, Math.round(el.h * scale));
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      // Clone the element and reset positional offset to local 0,0 so the
+      // inner draw helper places it at the canvas origin.
+      const local = JSON.parse(JSON.stringify(el));
+      local.x = 0; local.y = 0;
+      // Bake rotation and opacity into the render
+      ctx.save();
+      ctx.globalAlpha = local.opacity || 1;
+      if (local.blendMode && local.blendMode !== 'normal') {
+        ctx.globalCompositeOperation = local.blendMode;
+      }
+      if (local.rotation) {
+        ctx.translate(local.w / 2, local.h / 2);
+        ctx.rotate(local.rotation * Math.PI / 180);
+        ctx.translate(-local.w / 2, -local.h / 2);
+      }
+      await drawElementInnerToCtx(ctx, local);
+      ctx.restore();
+
+      const dataUrl = canvas.toDataURL('image/png');
+
+      // Replace element properties in place
+      const oldName = el.name;
+      // Clear properties not relevant to image
+      for (const k of Object.keys(el)) {
+        if (!['id', 'x', 'y', 'w', 'h', 'z', 'visible', 'locked', '_fromMaster'].includes(k)) {
+          delete el[k];
+        }
+      }
+      el.type = 'image';
+      el.src = dataUrl;
+      el.objectFit = 'contain';
+      el.opacity = 1;
+      el.rotation = 0;
+      el.name = oldName + ' (raster)';
+
+      const ab = findArtboardOfElement(el);
+      if (ab && ab.isMaster) syncFromMaster();
+      pushHistory(); renderAll();
+      toast('Rasterized', 'ok', 'RASTER');
+      return true;
+    } catch (err) {
+      console.error('[rasterize]', err);
+      toast('Rasterize failed: ' + (err.message || 'unknown'), 'err', 'RASTER.ERR');
+      return false;
+    }
+  }
+
+  async function rasterizeSelected() {
+    const sel = selectedElements();
+    if (sel.length === 0) { toast('Select layers to rasterize'); return; }
+    if (sel.length === 1) {
+      await rasterizeElement(sel[0]);
+      return;
+    }
+    // Multiple: rasterize each independently
+    for (const el of sel) {
+      if (el.type !== 'image' && el.type !== 'group') await rasterizeElement(el);
+    }
+  }
+
+  // ============================================================
+  // GROUPS
+  // ============================================================
+  // A group is an element with type:'group' and children:[el, el, ...].
+  // Children store ABSOLUTE artboard coordinates (same coordinate space as
+  // non-grouped elements) so existing rendering, Smart Layout, and master
+  // sync don't need special cases. Group x/y/w/h is the bounding box of
+  // children; updated whenever children move or resize.
+
+  function computeGroupBounds(children) {
+    if (!children || !children.length) return { x: 0, y: 0, w: 0, h: 0 };
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of children) {
+      minX = Math.min(minX, c.x);
+      minY = Math.min(minY, c.y);
+      maxX = Math.max(maxX, c.x + c.w);
+      maxY = Math.max(maxY, c.y + c.h);
+    }
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  function groupSelected() {
+    const sel = selectedElements();
+    if (sel.length < 2) { toast('Select 2 or more layers to group'); return; }
+    const ab = activeArtboard(); if (!ab) return;
+    // Don't allow grouping the master background OR an element that's already
+    // a direct child of a group at the same level
+    const valid = sel.filter(e => e.type !== 'group' || true);  // groups can nest
+    if (valid.length < 2) return;
+    const bounds = computeGroupBounds(valid);
+    const group = {
+      id: uid(),
+      type: 'group',
+      x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h,
+      rotation: 0, opacity: 1, visible: true, locked: false,
+      z: Math.max(...valid.map(e => e.z)) + 0.5,  // sits above its highest child
+      name: 'Group',
+      children: valid.map(e => e.id),  // store as IDs, lookup live in ab.elements
+    };
+    ab.elements.push(group);
+    // Mark children as belonging to this group
+    valid.forEach(e => { e._group = group.id; });
+    // Renumber z indices so the group sits above its children
+    state.selectedElementIds = [group.id];
+    pushHistory();
+    if (ab.isMaster) syncFromMaster();
+    renderAll();
+    toast('Grouped ' + valid.length + ' layers', 'ok', 'GROUP');
+  }
+
+  function ungroupSelected() {
+    const sel = selectedElements();
+    if (sel.length === 0) return;
+    const ab = activeArtboard(); if (!ab) return;
+    let anyUngrouped = false;
+    for (const g of sel) {
+      if (g.type !== 'group') continue;
+      // Detach children
+      ab.elements.forEach(e => {
+        if (e._group === g.id) delete e._group;
+      });
+      // Remove the group element itself
+      const idx = ab.elements.indexOf(g);
+      if (idx >= 0) ab.elements.splice(idx, 1);
+      anyUngrouped = true;
+    }
+    if (anyUngrouped) {
+      pushHistory();
+      if (ab.isMaster) syncFromMaster();
+      renderAll();
+      toast('Ungrouped', 'ok', 'GROUP');
+    }
+  }
+
+  // Returns the element children that belong to a group, in z-order
+  function childrenOfGroup(ab, group) {
+    if (!ab || !group) return [];
+    return ab.elements.filter(e => e._group === group.id).sort((a,b) => a.z - b.z);
+  }
+
+  async function rasterizeGroup(group) {
+    if (!group || group.type !== 'group') return false;
+    const ab = findArtboardOfElement(group);
+    if (!ab) return false;
+    const children = childrenOfGroup(ab, group);
+    if (children.length === 0) {
+      // Empty group — just delete it
+      const idx = ab.elements.indexOf(group);
+      if (idx >= 0) ab.elements.splice(idx, 1);
+      pushHistory(); renderAll();
+      return true;
+    }
+    try {
+      const scale = 2;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(group.w * scale));
+      canvas.height = Math.max(1, Math.round(group.h * scale));
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      // Translate so the group's top-left is at canvas origin
+      ctx.translate(-group.x, -group.y);
+      // Draw each child in z-order
+      for (const child of children) {
+        if (child.visible === false) continue;
+        await drawElementToCtx(ctx, child, ab);
+      }
+      const dataUrl = canvas.toDataURL('image/png');
+
+      // Replace the group with an image at the same bounds
+      const newImg = {
+        id: group.id,
+        type: 'image',
+        src: dataUrl,
+        objectFit: 'contain',
+        x: group.x, y: group.y, w: group.w, h: group.h,
+        rotation: 0, opacity: 1, visible: true, locked: false,
+        z: group.z,
+        name: group.name + ' (raster)',
+        _fromMaster: group._fromMaster,
+      };
+      // Remove children from artboard
+      ab.elements = ab.elements.filter(e => e._group !== group.id);
+      // Replace the group entry
+      const gIdx = ab.elements.indexOf(group);
+      if (gIdx >= 0) ab.elements[gIdx] = newImg;
+      else ab.elements.push(newImg);
+
+      state.selectedElementIds = [newImg.id];
+      pushHistory();
+      if (ab.isMaster) syncFromMaster();
+      renderAll();
+      toast('Group rasterized', 'ok', 'GROUP.RASTER');
+      return true;
+    } catch (err) {
+      console.error('[rasterizeGroup]', err);
+      toast('Rasterize group failed: ' + (err.message || 'unknown'), 'err', 'GROUP.ERR');
+      return false;
+    }
+  }
+
   function defaultName(el) {
     if (el.type === 'text') return (el.text || 'Text').slice(0,20);
     if (el.type === 'image') return 'Image';
     if (el.type === 'shape') return SHAPES[el.shape]?.name || 'Shape';
     if (el.type === 'line') return 'Line';
     if (el.type === 'path') return 'Path';
+    if (el.type === 'group') return 'Group';
     return 'Element';
   }
 
@@ -1980,7 +2212,15 @@ const App = (function(){
     for (const id of state.selectedElementIds) {
       cleanupClipsForDeletedElement(ab, id);
     }
-    ab.elements = ab.elements.filter(e => !state.selectedElementIds.includes(e.id));
+    // Expand: deleting a group also deletes all its children
+    const toDelete = new Set(state.selectedElementIds);
+    for (const id of state.selectedElementIds) {
+      const el = ab.elements.find(e => e.id === id);
+      if (el && el.type === 'group') {
+        ab.elements.forEach(c => { if (c._group === id) toDelete.add(c.id); });
+      }
+    }
+    ab.elements = ab.elements.filter(e => !toDelete.has(e.id));
     state.selectedElementIds = [];
     if (ab.isMaster) syncFromMaster();
     pushHistory(); renderAll();
@@ -2316,18 +2556,24 @@ const App = (function(){
           width: master.width,
           height: master.height,
           imageBase64,
-          elements: master.elements.map(el => ({
-            id: el.id,
-            type: el.type,
-            role: el.role,
-            x: el.x, y: el.y, w: el.w, h: el.h,
-            name: el.name,
-            ...(el.type === 'text' ? {
-              text: el.text,
-              fontSize: el.fontSize,
-            } : {}),
-            ...(el.type === 'shape' ? { shape: el.shape } : {}),
-          })),
+          // Filter out children of groups — Gemini sees the GROUP as a
+          // single element. Children move together with the group when we
+          // apply the layout result below.
+          elements: master.elements
+            .filter(el => !el._group)
+            .map(el => ({
+              id: el.id,
+              type: el.type,
+              role: el.role,
+              x: el.x, y: el.y, w: el.w, h: el.h,
+              name: el.name,
+              ...(el.type === 'text' ? {
+                text: el.text,
+                fontSize: el.fontSize,
+              } : {}),
+              ...(el.type === 'shape' ? { shape: el.shape } : {}),
+              ...(el.type === 'group' ? { isGroup: true } : {}),
+            })),
         },
         target: { width: ab.width, height: ab.height, name: ab.name },
       };
@@ -2358,9 +2604,32 @@ const App = (function(){
       for (const sug of json.elements) {
         const el = targetByMaster.get(sug.id);
         if (!el) continue;
+        const oldX = el.x, oldY = el.y, oldW = el.w, oldH = el.h;
         el.x = sug.x; el.y = sug.y; el.w = sug.w; el.h = sug.h;
         if (el.type === 'text' && typeof sug.fontSize === 'number') {
           el.fontSize = sug.fontSize;
+        }
+        // If this is a group, move all its children by the same delta and
+        // scale them by the same ratio so children stay positioned within
+        // the group's new bounds.
+        if (el.type === 'group') {
+          const dx = sug.x - oldX;
+          const dy = sug.y - oldY;
+          const sx = oldW ? sug.w / oldW : 1;
+          const sy = oldH ? sug.h / oldH : 1;
+          const children = ab.elements.filter(c => c._group === el.id);
+          for (const c of children) {
+            // Scale child position relative to group's old origin, then offset
+            const localX = c.x - oldX;
+            const localY = c.y - oldY;
+            c.x = sug.x + localX * sx;
+            c.y = sug.y + localY * sy;
+            c.w = c.w * sx;
+            c.h = c.h * sy;
+            if (c.type === 'text' && c.fontSize) {
+              c.fontSize = c.fontSize * Math.min(sx, sy);
+            }
+          }
         }
         updated++;
       }
@@ -2417,6 +2686,17 @@ const App = (function(){
     // Clear any clipPath defs from previous render; they'll be rebuilt as
     // elements are rendered.
     clearGlobalClipPaths();
+    // Recompute group bounds from their live children, so the group's
+    // bounding box stays accurate when children are moved/resized.
+    for (const ab of state.artboards) {
+      const groups = ab.elements.filter(e => e.type === 'group');
+      for (const g of groups) {
+        const children = ab.elements.filter(c => c._group === g.id);
+        if (children.length === 0) continue;  // empty group keeps last bounds
+        const b = computeGroupBounds(children);
+        g.x = b.x; g.y = b.y; g.w = b.w; g.h = b.h;
+      }
+    }
     state.artboards.forEach((ab, idx) => {
       const wrap = document.createElement('div');
       wrap.className = 'artboard-wrap';
@@ -2544,6 +2824,12 @@ const App = (function(){
       const closed = el.closed ? ' Z' : '';
       const svgStr = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none"><path d="${pts}${closed}" fill="${el.fill||'none'}" stroke="${el.stroke||'#000'}" stroke-width="${(el.strokeWidth||2)*100/Math.max(el.w,el.h)}" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
       node.innerHTML = svgStr;
+    } else if (el.type === 'group') {
+      // Group wrapper: visual indicator only when selected. Children render
+      // independently in the main render loop.
+      node.classList.add('group-wrapper');
+      // Group is "transparent" to clicks on empty areas — let children get them
+      node.style.pointerEvents = state.selectedElementIds.includes(el.id) ? 'auto' : 'none';
     }
 
     if (state.selectedElementIds.includes(el.id) && state.selectedElementIds.length===1) {
@@ -3376,35 +3662,15 @@ const App = (function(){
         <div class="prop-row"><label>Width</label><input type="number" data-prop="strokeWidth" value="${el.strokeWidth||2}" /></div>`;
     }
 
-    // Mask section — shown when this layer is clipped or used as a mask base
+    // Mask section disabled — clipping mask render didn't work reliably across
+    // browsers. Data model preserved (clippedBy, etc.) so existing designs aren't
+    // lost. Replaced with rasterize/group workflow which is more predictable.
+    /*
     const inspectorAb = state.artboards.find(a => a.elements.includes(el));
     const elIsClipped = !!el.clippedBy;
     const elIsMaskBase = inspectorAb && isUsedAsMask(inspectorAb, el);
-    if (elIsClipped || elIsMaskBase) {
-      const maskRef = elIsClipped ? findMaskElement(inspectorAb, el.clippedBy) : null;
-      const maskedRefName = maskRef?.name || (maskRef ? defaultName(maskRef) : 'Layer below');
-      const maskRefHidden = !!maskRef?.clipBaseHidden;
-      const clippedChildrenCount = elIsMaskBase
-        ? clippedElementsOf(inspectorAb, el).length
-        : 0;
-      html += `
-        <div class="prop-section-title"><span>Mask</span><span class="num">CLIP</span></div>
-        <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;color:var(--text-2);line-height:1.6;padding:8px 0">
-          ${elIsClipped ? `<div>Clipped by: <span style="color:var(--signal)">${escapeHtml(maskedRefName)}</span></div>` : ''}
-          ${elIsMaskBase ? `<div>Masking ${clippedChildrenCount} layer${clippedChildrenCount === 1 ? '' : 's'} above</div>` : ''}
-        </div>
-        ${elIsClipped ? `
-          <button class="btn btn-sm btn-block" data-act-mask="release">${ic('scissors')} Release clipping mask</button>
-          <button class="btn btn-sm btn-block" style="margin-top:6px" data-act-mask="toggle-base-hidden">${ic(maskRefHidden ? 'eye' : 'eye-slash')} ${maskRefHidden ? 'Show mask shape' : 'Hide mask shape'}</button>
-        ` : ''}
-        ${elIsMaskBase ? `
-          <div class="prop-row"><label>Hide mask base</label>
-            <input type="checkbox" data-prop-bool="clipBaseHidden" ${el.clipBaseHidden ? 'checked' : ''} />
-          </div>
-        ` : ''}
-        ${!elIsClipped && !elIsMaskBase ? `<button class="btn btn-sm btn-block" data-act-mask="create">${ic('scissors')} Use as clipping mask (Cmd+Alt+G)</button>` : ''}
-      `;
-    }
+    if (elIsClipped || elIsMaskBase) { ... }
+    */
 
 
     if (el.attribution && el.attribution.source) {
@@ -3551,24 +3817,44 @@ const App = (function(){
     const ab = activeArtboard();
     if (!ab) { body.innerHTML = ''; return; }
     body.innerHTML = '';
-    const els = [...ab.elements].sort((a,b)=>b.z-a.z);
-    els.forEach(el => {
+    // Build a render list that interleaves groups with their children.
+    // For each layer in z-order (top first), if it's a group, also render
+    // its children indented below it.
+    const allSorted = [...ab.elements].sort((a,b)=>b.z-a.z);
+    const renderedIds = new Set();
+    const renderList = [];   // { el, depth }
+    for (const el of allSorted) {
+      if (renderedIds.has(el.id)) continue;
+      if (el._group) continue;  // children of groups are rendered with their group
+      renderedIds.add(el.id);
+      renderList.push({ el, depth: 0 });
+      if (el.type === 'group') {
+        const children = ab.elements.filter(c => c._group === el.id).sort((a,b)=>b.z-a.z);
+        for (const child of children) {
+          renderedIds.add(child.id);
+          renderList.push({ el: child, depth: 1 });
+        }
+      }
+    }
+    renderList.forEach(({ el, depth }) => {
       const item = document.createElement('div');
       item.className = 'layer-item' + (state.selectedElementIds.includes(el.id)?' selected':'');
       item.draggable = true; item.dataset.layerId = el.id;
+      if (depth > 0) item.classList.add('layer-child');
       let thumbHtml = '';
       if (el.type === 'image') thumbHtml = `<img src="${el.src}" />`;
       else if (el.type === 'text') thumbHtml = ic('font');
       else if (el.type === 'shape') thumbHtml = ic('shapes');
       else if (el.type === 'line') thumbHtml = ic('grip-lines');
       else if (el.type === 'path') thumbHtml = ic('bezier-curve');
+      else if (el.type === 'group') thumbHtml = ic('layer-group');
       const roleBadge = el.role ? `<span class="layer-role">${el.role.slice(0,3).toUpperCase()}</span>` : '';
-      const clippedIcon = el.clippedBy ? `<span class="layer-clip-arrow" title="Clipped to layer below">${ic('arrow-down')}</span>` : '';
-      const maskBadge = isUsedAsMask(ab, el) ? `<span class="layer-mask-badge" title="Used as clipping mask">MASK</span>` : '';
-      if (el.clippedBy) item.classList.add('clipped');
+      const groupBadge = el.type === 'group' ? `<span class="layer-group-badge" title="Group">GROUP</span>` : '';
+      const indent = depth > 0 ? `<span class="layer-indent"></span>` : '';
       item.innerHTML = `
+        ${indent}
         <div class="layer-thumb">${thumbHtml}</div>
-        ${clippedIcon}${roleBadge}${maskBadge}
+        ${roleBadge}${groupBadge}
         <div class="layer-name">${escapeHtml(el.name||defaultName(el))}</div>
         <div class="layer-actions">
           <button data-act="visible" title="Visibility">${el.visible===false?ic('eye-slash'):ic('eye')}</button>
@@ -4122,39 +4408,41 @@ const App = (function(){
 
   function showElementContextMenu(x, y) {
     const sel = selectedElements();
-    const hasClipped = sel.some(e => e.clippedBy);
     const ab = activeArtboard();
-    const anyUsedAsMask = ab && sel.some(e => isUsedAsMask(ab, e));
-    const maskItems = [];
-    if (sel.length > 0) {
-      maskItems.push({
-        label: hasClipped ? 'Release clipping mask' : 'Create clipping mask',
-        icon: hasClipped ? 'scissors' : 'scissors',
-        kbd: '⌘⌥G',
-        action: toggleClippingMaskForSelected,
+    const rasterizable = sel.filter(e => e.type !== 'image').length > 0;
+    const hasGroup = sel.some(e => e.type === 'group');
+    const canGroup = sel.length >= 2;
+    const transformItems = [];
+    if (rasterizable) {
+      transformItems.push({
+        label: hasGroup ? 'Rasterize group' : (sel.length > 1 ? 'Rasterize layers' : 'Rasterize'),
+        icon: 'image',
+        kbd: '⌘E',
+        action: rasterizeSelected,
       });
-      // If any selected element is acting as a mask base, offer hide/show toggle
-      if (anyUsedAsMask) {
-        const baseHidden = sel.some(e => e.clipBaseHidden && isUsedAsMask(ab, e));
-        maskItems.push({
-          label: baseHidden ? 'Show mask base' : 'Hide mask base (silhouette only)',
-          icon: baseHidden ? 'eye' : 'eye-slash',
-          action: () => {
-            sel.forEach(e => {
-              if (isUsedAsMask(ab, e)) e.clipBaseHidden = !e.clipBaseHidden;
-            });
-            pushHistory(); renderAll();
-          },
-        });
-      }
+    }
+    if (canGroup && !hasGroup) {
+      transformItems.push({
+        label: 'Group layers',
+        icon: 'layer-group',
+        kbd: '⌘G',
+        action: groupSelected,
+      });
+    }
+    if (hasGroup) {
+      transformItems.push({
+        label: 'Ungroup',
+        icon: 'layer-group',
+        kbd: '⌘⇧G',
+        action: ungroupSelected,
+      });
     }
     showContextMenu(x, y, [
       {label:'Copy', icon:'copy', kbd:'⌘C', action: copySelected},
       {label:'Paste', icon:'clipboard', kbd:'⌘V', action: pasteClipboard},
       {label:'Duplicate', icon:'copy', kbd:'⌘D', action: ()=>{copySelected(); pasteClipboard();}},
+      ...(transformItems.length ? [{sep:true}, ...transformItems] : []),
       {sep:true},
-      ...maskItems,
-      ...(maskItems.length ? [{sep:true}] : []),
       {label:'Bring forward', icon:'arrow-up', action: ()=>changeZ(1)},
       {label:'Send backward', icon:'arrow-down', action: ()=>changeZ(-1)},
       {label:'Bring to front', icon:'arrow-up', action: ()=>changeZ('top')},
@@ -4314,7 +4602,20 @@ const App = (function(){
       } else if (!state.selectedElementIds.includes(id)) { state.selectedElementIds = [id]; }
       renderAll();
       const sels = selectedElements();
-      dragState = {mode:'drag', els: sels.map(s=>({el:s, startX:s.x, startY:s.y})),
+      // Expand groups: if a group is being dragged, include its children too
+      // so they move together. The group itself is also moved.
+      const dragSet = new Set();
+      const dragList = [];
+      for (const s of sels) {
+        if (!dragSet.has(s.id)) { dragSet.add(s.id); dragList.push(s); }
+        if (s.type === 'group') {
+          const children = ab.elements.filter(e => e._group === s.id);
+          for (const c of children) {
+            if (!dragSet.has(c.id)) { dragSet.add(c.id); dragList.push(c); }
+          }
+        }
+      }
+      dragState = {mode:'drag', els: dragList.map(s=>({el:s, startX:s.x, startY:s.y})),
         startX:e.clientX, startY:e.clientY};
       return;
     }
@@ -4589,10 +4890,17 @@ const App = (function(){
       if (cmd && e.key === 'v') { e.preventDefault(); pasteClipboard(); return; }
       if (cmd && e.key === 'd') { e.preventDefault(); copySelected(); pasteClipboard(); return; }
       if (cmd && e.key === 'a') { e.preventDefault(); const ab = activeArtboard(); if (ab) state.selectedElementIds = ab.elements.map(e=>e.id); renderAll(); return; }
-      // Photoshop shortcut: Cmd/Ctrl + Alt + G = toggle clipping mask
-      if (cmd && e.altKey && (e.key === 'g' || e.key === 'G')) {
+      // Group: Cmd/Ctrl + G; Ungroup: Cmd/Ctrl + Shift + G
+      if (cmd && !e.altKey && (e.key === 'g' || e.key === 'G')) {
         e.preventDefault();
-        toggleClippingMaskForSelected();
+        if (e.shiftKey) ungroupSelected();
+        else groupSelected();
+        return;
+      }
+      // Rasterize: Cmd/Ctrl + E
+      if (cmd && (e.key === 'e' || e.key === 'E')) {
+        e.preventDefault();
+        rasterizeSelected();
         return;
       }
       if (cmd && e.key === 's') { e.preventDefault(); persistProject(); toast('Saved','ok','PROJECT.SAVED'); return; }
@@ -4606,12 +4914,24 @@ const App = (function(){
         const d = e.shiftKey ? 10 : 1;
         const sel = selectedElements();
         if (sel.length) {
-          sel.forEach(el => {
+          // Expand groups to include their children
+          const ab = activeArtboard();
+          const moveSet = new Set();
+          const moveList = [];
+          for (const s of sel) {
+            if (!moveSet.has(s.id)) { moveSet.add(s.id); moveList.push(s); }
+            if (s.type === 'group' && ab) {
+              const children = ab.elements.filter(c => c._group === s.id);
+              for (const c of children) {
+                if (!moveSet.has(c.id)) { moveSet.add(c.id); moveList.push(c); }
+              }
+            }
+          }
+          moveList.forEach(el => {
             if (e.key === 'ArrowUp') el.y -= d; if (e.key === 'ArrowDown') el.y += d;
             if (e.key === 'ArrowLeft') el.x -= d; if (e.key === 'ArrowRight') el.x += d;
           });
-          const ab = activeArtboard();
-          if (ab.isMaster) syncFromMaster();
+          if (ab && ab.isMaster) syncFromMaster();
           renderAll();
           e.preventDefault();
         }
