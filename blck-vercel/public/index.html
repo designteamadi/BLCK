@@ -2470,23 +2470,18 @@ const App = (function(){
     if (el.filter) node.style.filter = el.filter;
     if (el.outline) node.style.outline = el.outline;
 
-    // If this element is clipped by another, build the clipPath in the
-    // global SVG defs. We apply the clip-path CSS to the inner content
-    // (img, svg, text) rather than the wrapper, because the wrapper has
-    // `transform: rotate(...)` which interacts poorly with clip-path on
-    // the same element in some browsers (image escapes the clip).
-    let clipPathUrl = null;
-    if (el.clippedBy) {
+    // Apply CSS clip-path to the wrapper for NON-image elements (text, shape, path).
+    // Images handle their own clipping via inline SVG below, which is more reliable.
+    // Applying CSS clip-path to the wrapper for clipped images can produce zero
+    // visible area in some browsers, hiding the image entirely.
+    if (el.clippedBy && el.type !== 'image') {
       const maskEl = findMaskElement(ab, el.clippedBy);
       if (maskEl) {
         const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
         ensureGlobalClipPath(clipId, maskEl, el);
-        clipPathUrl = `url(#${clipId})`;
-        // Also belt-and-suspenders: apply to the wrapper (works in modern browsers)
+        const clipPathUrl = `url(#${clipId})`;
         node.style.clipPath = clipPathUrl;
         node.style.webkitClipPath = clipPathUrl;
-        // Ensure inner content can't escape — clip-path implies overflow:hidden
-        // but some content (text with absolute children) may need it explicitly
         node.style.overflow = 'hidden';
       }
     }
@@ -2532,8 +2527,29 @@ const App = (function(){
           const fit = el.objectFit === 'contain' ? 'xMidYMid meet'
                     : el.objectFit === 'fill' ? 'none'
                     : 'xMidYMid slice';  // cover
-          const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${el.w} ${el.h}" width="${el.w}" height="${el.h}" preserveAspectRatio="none"><defs><clipPath id="${localId}" clipPathUnits="userSpaceOnUse">${maskInner}</clipPath></defs><image href="${el.src}" x="0" y="0" width="${el.w}" height="${el.h}" preserveAspectRatio="${fit}" clip-path="url(#${localId})"/></svg>`;
+          // Use foreignObject containing an HTML <img> instead of SVG <image>.
+          // Reason: SVG <image> loading is subject to CORS; cross-origin images
+          // (like Pexels CDN) often fail silently. HTML <img> inside a
+          // foreignObject is rendered without CORS restrictions, just like
+          // a normal HTML image.
+          const fitCss = el.objectFit || 'cover';
+          const radiusCss = el.radius ? `border-radius:${el.radius}px;` : '';
+          const filterCss = el.filter ? `filter:${el.filter};` : '';
+          const safeSrc = (el.src || '').replace(/"/g, '&quot;');
+          const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${el.w} ${el.h}" width="${el.w}" height="${el.h}" preserveAspectRatio="none"><defs><clipPath id="${localId}" clipPathUnits="userSpaceOnUse">${maskInner}</clipPath></defs><foreignObject x="0" y="0" width="${el.w}" height="${el.h}" clip-path="url(#${localId})"><img xmlns="http://www.w3.org/1999/xhtml" src="${safeSrc}" style="width:100%;height:100%;object-fit:${fitCss};display:block;${radiusCss}${filterCss}" draggable="false" /></foreignObject></svg>`;
           node.innerHTML = svgStr;
+          // Diagnostic: log clipped image render info to console so we can
+          // verify in DevTools that the SVG was built correctly
+          console.log('[clip-render]', {
+            elementId: el.id,
+            elementBounds: { x: el.x, y: el.y, w: el.w, h: el.h },
+            maskId: maskEl2.id,
+            maskBounds: { x: maskEl2.x, y: maskEl2.y, w: maskEl2.w, h: maskEl2.h },
+            maskShape: maskEl2.shape || maskEl2.type,
+            offsetXY: { x: offsetX, y: offsetY },
+            svgLength: svgStr.length,
+            srcPreview: (el.src || '').slice(0, 60),
+          });
         } else {
           // Mask reference broken — fall through to normal image render
           const img = document.createElement('img');
