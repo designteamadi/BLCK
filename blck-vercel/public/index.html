@@ -2105,6 +2105,97 @@ const App = (function(){
     return `<rect x="${offsetX}" y="${offsetY}" width="${w}" height="${h}"/>`;
   }
 
+  // Maintains a single global <svg><defs> container in the DOM where all
+  // active clipPath elements live. Reset via clearGlobalClipPaths() at the
+  // start of each render pass.
+  function getGlobalClipDefs() {
+    let svg = document.getElementById('blck-global-clip-svg');
+    if (!svg) {
+      svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.id = 'blck-global-clip-svg';
+      svg.setAttribute('width', '0');
+      svg.setAttribute('height', '0');
+      svg.style.position = 'absolute';
+      svg.style.width = '0';
+      svg.style.height = '0';
+      svg.style.overflow = 'hidden';
+      svg.style.pointerEvents = 'none';
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      svg.appendChild(defs);
+      document.body.appendChild(svg);
+    }
+    return svg.querySelector('defs');
+  }
+
+  function clearGlobalClipPaths() {
+    const defs = getGlobalClipDefs();
+    while (defs.firstChild) defs.removeChild(defs.firstChild);
+  }
+
+  // Builds and appends a <clipPath> for `clipped` element using `maskEl`'s
+  // silhouette. ClipPath coordinates are in the clipped element's local
+  // space (origin at clipped's top-left, sized to clipped.w × clipped.h).
+  function ensureGlobalClipPath(clipId, maskEl, clipped) {
+    const defs = getGlobalClipDefs();
+    // Remove any existing clipPath with this id
+    const existing = defs.querySelector(`#${CSS.escape(clipId)}`);
+    if (existing) existing.remove();
+
+    const offsetX = maskEl.x - clipped.x;
+    const offsetY = maskEl.y - clipped.y;
+    const w = maskEl.w;
+    const h = maskEl.h;
+
+    const NS = 'http://www.w3.org/2000/svg';
+    const cp = document.createElementNS(NS, 'clipPath');
+    cp.setAttribute('id', clipId);
+    cp.setAttribute('clipPathUnits', 'userSpaceOnUse');
+
+    if (maskEl.type === 'shape') {
+      const def = SHAPES[maskEl.shape];
+      if (def && def.svg) {
+        // Wrap shape SVG in a group with positioning transform
+        const g = document.createElementNS(NS, 'g');
+        g.setAttribute('transform', `translate(${offsetX}, ${offsetY}) scale(${w/24}, ${h/24})`);
+        // Parse the shape SVG into actual DOM nodes so the clipPath can use them
+        const parser = new DOMParser();
+        const parsed = parser.parseFromString(
+          `<svg xmlns="${NS}">${def.svg}</svg>`, 'image/svg+xml'
+        );
+        Array.from(parsed.documentElement.childNodes).forEach(child => {
+          g.appendChild(child.cloneNode(true));
+        });
+        cp.appendChild(g);
+      } else {
+        // Fallback rect
+        const r = document.createElementNS(NS, 'rect');
+        r.setAttribute('x', offsetX);
+        r.setAttribute('y', offsetY);
+        r.setAttribute('width', w);
+        r.setAttribute('height', h);
+        cp.appendChild(r);
+      }
+    } else if (maskEl.type === 'path' && maskEl.points && maskEl.points.length) {
+      const cmds = maskEl.points.map((p, i) =>
+        (i === 0 ? 'M' : 'L') + (offsetX + p.x * w) + ',' + (offsetY + p.y * h)
+      );
+      const d = cmds.join(' ') + (maskEl.closed ? ' Z' : '');
+      const path = document.createElementNS(NS, 'path');
+      path.setAttribute('d', d);
+      cp.appendChild(path);
+    } else {
+      // Text or fallback: rectangle of the mask element's bounding box
+      const r = document.createElementNS(NS, 'rect');
+      r.setAttribute('x', offsetX);
+      r.setAttribute('y', offsetY);
+      r.setAttribute('width', w);
+      r.setAttribute('height', h);
+      cp.appendChild(r);
+    }
+
+    defs.appendChild(cp);
+  }
+
 
   // Smart Layout: when true, every new artboard pings /api/layout for a Gemini-designed
   // arrangement instead of just proportionally fitting. Falls back silently to proportional
@@ -2296,6 +2387,9 @@ const App = (function(){
 
   function renderWorld() {
     const world = $('#world'); world.innerHTML = '';
+    // Clear any clipPath defs from previous render; they'll be rebuilt as
+    // elements are rendered.
+    clearGlobalClipPaths();
     state.artboards.forEach((ab, idx) => {
       const wrap = document.createElement('div');
       wrap.className = 'artboard-wrap';
@@ -2349,22 +2443,18 @@ const App = (function(){
     if (el.filter) node.style.filter = el.filter;
     if (el.outline) node.style.outline = el.outline;
 
-    // If this element is clipped by another, apply CSS clip-path via inline SVG
+    // If this element is clipped by another, apply CSS clip-path via a
+    // GLOBAL SVG defs container. Using global defs (rather than inline per
+    // element) is critical for cross-browser reliability — Chrome and Safari
+    // are inconsistent about resolving clip-path: url(#id) when the SVG
+    // defining the clipPath is nested inside the element being clipped.
     if (el.clippedBy) {
       const maskEl = findMaskElement(ab, el.clippedBy);
       if (maskEl) {
-        const maskSvgContent = getMaskSvgContent(maskEl, el);
-        // We use a data: URI inline SVG referenced by clip-path. The mask SVG
-        // is positioned in the clipped element's coordinate space.
-        const clipId = 'clip-' + el.id;
-        const svgInline = `<svg xmlns="http://www.w3.org/2000/svg" width="${el.w}" height="${el.h}" style="position:absolute;width:0;height:0;pointer-events:none"><defs><clipPath id="${clipId}">${maskSvgContent}</clipPath></defs></svg>`;
-        node.insertAdjacentHTML('afterbegin', svgInline);
+        const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
+        ensureGlobalClipPath(clipId, maskEl, el);
         node.style.clipPath = `url(#${clipId})`;
         node.style.webkitClipPath = `url(#${clipId})`;
-        if (el.clipInvert) {
-          // Inverted clipping: harder with clip-path; use a path with even-odd fill rule
-          // For now, leave as a future enhancement — flag is preserved in data
-        }
       }
     }
 
