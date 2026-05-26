@@ -351,6 +351,18 @@
   .prop-row > label{font-family:var(--font-mono);font-size:9px;color:var(--text-3);width:50px;flex-shrink:0;
     letter-spacing:0.1em;text-transform:uppercase}
   .prop-row input,.prop-row select{flex:1;min-width:0}
+  /* Color cell: swatch + no-color toggle paired together */
+  .color-cell{flex:1;display:flex;align-items:center;gap:6px;min-width:0}
+  .color-cell input[type="color"]{flex:1;min-width:0}
+  .color-cell input[type="color"].is-none{opacity:0.35}
+  .color-toggle{flex-shrink:0;width:22px;height:22px;border:1px solid var(--line);
+    background:var(--ink-2);display:flex;align-items:center;justify-content:center;
+    cursor:pointer;font-family:var(--font-mono);font-size:9px;color:var(--text-3);
+    position:relative;padding:0;border-radius:0}
+  .color-toggle:hover{color:var(--text);border-color:var(--text-3)}
+  .color-toggle.is-none{background:var(--ink-2);color:var(--signal);border-color:var(--signal)}
+  .color-toggle.is-none::before{content:'';position:absolute;left:2px;right:2px;top:50%;
+    height:1.5px;background:currentColor;transform:rotate(-30deg)}
   .prop-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:9px}
   .prop-grid > div{display:flex;align-items:center;gap:5px}
   .prop-grid > div > label{font-family:var(--font-mono);font-size:9px;color:var(--text-3);letter-spacing:0.05em;
@@ -2045,13 +2057,31 @@ const App = (function(){
     let anyFailed = false;
     for (const el of sel) {
       if (el.clippedBy) {
+        // Releasing: also restore visibility of the mask base if we hid it
+        // when creating the clip. Only restore if no OTHER layer still clips
+        // to the same mask.
+        const maskEl = findMaskElement(ab, el.clippedBy);
         delete el.clippedBy;
+        if (maskEl && maskEl.clipBaseHidden && !isUsedAsMask(ab, maskEl)) {
+          delete maskEl.clipBaseHidden;
+        }
         anyChanged = true;
       } else {
         const sorted = [...ab.elements].sort((a,b) => a.z - b.z);
         const idx = sorted.findIndex(e => e.id === el.id);
         if (idx > 0) {
-          el.clippedBy = sorted[idx - 1]._fromMaster || sorted[idx - 1].id;
+          const baseEl = sorted[idx - 1];
+          el.clippedBy = baseEl._fromMaster || baseEl.id;
+          // Auto-hide the mask base when an IMAGE is being clipped to it.
+          // Reasoning: when a user clips an image to a shape, they almost
+          // always want to see the image through the shape's silhouette,
+          // NOT the shape's fill covering the image. This matches the
+          // expectation from Photoshop/Figma.
+          // For text-clipped-to-shape we keep the base visible since that's
+          // often used for "shape with text label inside."
+          if (el.type === 'image') {
+            baseEl.clipBaseHidden = true;
+          }
           anyChanged = true;
         } else {
           anyFailed = true;
@@ -3225,6 +3255,18 @@ const App = (function(){
     }
   }
 
+  // Renders a color input paired with a "no color" toggle button. The toggle
+  // stores 'none' on the element's prop when active. Stashes the last real
+  // color on the input (data-last-color) so toggling back restores it.
+  function colorCell(propName, currentValue, defaultColor) {
+    const isNone = currentValue === 'none';
+    const colorForPicker = isNone ? defaultColor : (currentValue || defaultColor);
+    return `<div class="color-cell">
+      <input type="color" data-prop="${propName}" value="${colorForPicker}" data-last-color="${colorForPicker}" class="${isNone ? 'is-none' : ''}" />
+      <button type="button" class="color-toggle ${isNone ? 'is-none' : ''}" data-toggle-none="${propName}" title="${isNone ? 'Enable color' : 'No color'}"></button>
+    </div>`;
+  }
+
   function renderProperties() {
     const body = $('#properties-body');
     const sel = selectedElements();
@@ -3285,8 +3327,8 @@ const App = (function(){
     } else if (el.type === 'shape') {
       html += `
         <div class="prop-section-title"><span>Shape</span><span class="num">02</span></div>
-        <div class="prop-row"><label>Fill</label><input type="color" data-prop="fill" value="${el.fill||'#FF5949'}" /></div>
-        <div class="prop-row"><label>Stroke</label><input type="color" data-prop="stroke" value="${el.stroke==='none'?'#000000':(el.stroke||'#000000')}" /></div>
+        <div class="prop-row"><label>Fill</label>${colorCell('fill', el.fill, '#FF5949')}</div>
+        <div class="prop-row"><label>Stroke</label>${colorCell('stroke', el.stroke, '#000000')}</div>
         <div class="prop-row"><label>Stk W</label><input type="number" data-prop="strokeWidth" value="${el.strokeWidth||0}" /></div>`;
     } else if (el.type === 'image') {
       html += `
@@ -3301,10 +3343,18 @@ const App = (function(){
         <div class="prop-row"><label>Radius</label><input type="number" data-prop="radius" value="${el.radius||0}" /></div>
         <button class="btn btn-sm btn-block" style="margin-top:10px" onclick="App.removeBackgroundOfSelected()">${ic('eraser')} Remove background</button>
         <button class="btn btn-sm btn-block" style="margin-top:6px" onclick="App.replaceImage()">${ic('arrows-rotate')} Replace image</button>`;
-    } else if (el.type === 'line' || el.type === 'path') {
+    } else if (el.type === 'path') {
+      // Path can have BOTH fill and stroke (closed paths)
+      html += `
+        <div class="prop-section-title"><span>Path</span><span class="num">02</span></div>
+        <div class="prop-row"><label>Fill</label>${colorCell('fill', el.fill, '#FF5949')}</div>
+        <div class="prop-row"><label>Stroke</label>${colorCell('stroke', el.stroke, '#000000')}</div>
+        <div class="prop-row"><label>Width</label><input type="number" data-prop="strokeWidth" value="${el.strokeWidth||2}" /></div>`;
+    } else if (el.type === 'line') {
+      // Line only has stroke
       html += `
         <div class="prop-section-title"><span>Stroke</span><span class="num">02</span></div>
-        <div class="prop-row"><label>Color</label><input type="color" data-prop="stroke" value="${el.stroke||'#000000'}" /></div>
+        <div class="prop-row"><label>Color</label>${colorCell('stroke', el.stroke, '#000000')}</div>
         <div class="prop-row"><label>Width</label><input type="number" data-prop="strokeWidth" value="${el.strokeWidth||2}" /></div>`;
     }
 
@@ -3367,11 +3417,52 @@ const App = (function(){
           e[prop] = v;
           if (prop === 'role' && !e.name) e.name = defaultName(e);
         });
+        // If a color picker is being used, ensure the no-color state clears
+        if (input.type === 'color') {
+          input.classList.remove('is-none');
+          input.dataset.lastColor = input.value;
+          const toggle = body.querySelector(`[data-toggle-none="${prop}"]`);
+          if (toggle) {
+            toggle.classList.remove('is-none');
+            toggle.title = 'No color';
+          }
+        }
         const ab = state.artboards.find(a => a.elements.includes(sel[0]));
         if (ab && ab.isMaster) syncFromMaster();
         renderWorld(); renderLayers();
       });
       input.addEventListener('change', pushHistory);
+    });
+    // No-color toggle buttons next to color inputs
+    $$('[data-toggle-none]', body).forEach(btn => {
+      btn.onclick = () => {
+        const prop = btn.dataset.toggleNone;
+        const colorInput = body.querySelector(`input[type="color"][data-prop="${prop}"]`);
+        const currentlyNone = btn.classList.contains('is-none');
+        if (currentlyNone) {
+          // Re-enable color using last known
+          const lastColor = colorInput?.dataset.lastColor || '#FF5949';
+          sel.forEach(e => { e[prop] = lastColor; });
+          btn.classList.remove('is-none');
+          btn.title = 'No color';
+          if (colorInput) {
+            colorInput.classList.remove('is-none');
+            colorInput.value = lastColor;
+          }
+        } else {
+          // Save current color, set to none
+          if (colorInput) {
+            colorInput.dataset.lastColor = colorInput.value;
+            colorInput.classList.add('is-none');
+          }
+          sel.forEach(e => { e[prop] = 'none'; });
+          btn.classList.add('is-none');
+          btn.title = 'Enable color';
+        }
+        const ab = state.artboards.find(a => a.elements.includes(sel[0]));
+        if (ab && ab.isMaster) syncFromMaster();
+        renderWorld(); renderLayers(); pushHistory();
+      };
     });
     $$('[data-set-align]', body).forEach(b => {
       b.onclick = () => {
