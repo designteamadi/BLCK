@@ -2527,19 +2527,46 @@ const App = (function(){
           const fit = el.objectFit === 'contain' ? 'xMidYMid meet'
                     : el.objectFit === 'fill' ? 'none'
                     : 'xMidYMid slice';  // cover
-          // Use foreignObject containing an HTML <img> instead of SVG <image>.
-          // Reason: SVG <image> loading is subject to CORS; cross-origin images
-          // (like Pexels CDN) often fail silently. HTML <img> inside a
-          // foreignObject is rendered without CORS restrictions, just like
-          // a normal HTML image.
+          // Build the SVG via createElementNS to ensure namespaces are correct.
+          // Setting innerHTML on an HTML element to parse SVG content can
+          // mishandle the foreignObject → HTML namespace switch, resulting
+          // in an <img> that's in SVG namespace and doesn't render.
+          const SVG_NS = 'http://www.w3.org/2000/svg';
+          const HTML_NS = 'http://www.w3.org/1999/xhtml';
+          const svgEl = document.createElementNS(SVG_NS, 'svg');
+          svgEl.setAttribute('viewBox', `0 0 ${el.w} ${el.h}`);
+          svgEl.setAttribute('width', el.w);
+          svgEl.setAttribute('height', el.h);
+          svgEl.setAttribute('preserveAspectRatio', 'none');
+
+          const defs = document.createElementNS(SVG_NS, 'defs');
+          const cp = document.createElementNS(SVG_NS, 'clipPath');
+          cp.setAttribute('id', localId);
+          cp.setAttribute('clipPathUnits', 'userSpaceOnUse');
+          // maskInner is markup; use innerHTML on the clipPath (which is in SVG
+          // namespace, so innerHTML parses children as SVG correctly)
+          cp.innerHTML = maskInner;
+          defs.appendChild(cp);
+          svgEl.appendChild(defs);
+
+          const foreign = document.createElementNS(SVG_NS, 'foreignObject');
+          foreign.setAttribute('x', '0');
+          foreign.setAttribute('y', '0');
+          foreign.setAttribute('width', el.w);
+          foreign.setAttribute('height', el.h);
+          foreign.setAttribute('clip-path', `url(#${localId})`);
+
+          // Create the <img> in HTML namespace so it actually renders
           const fitCss = el.objectFit || 'cover';
-          const radiusCss = el.radius ? `border-radius:${el.radius}px;` : '';
-          const filterCss = el.filter ? `filter:${el.filter};` : '';
-          const safeSrc = (el.src || '').replace(/"/g, '&quot;');
-          const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${el.w} ${el.h}" width="${el.w}" height="${el.h}" preserveAspectRatio="none"><defs><clipPath id="${localId}" clipPathUnits="userSpaceOnUse">${maskInner}</clipPath></defs><foreignObject x="0" y="0" width="${el.w}" height="${el.h}" clip-path="url(#${localId})"><img xmlns="http://www.w3.org/1999/xhtml" src="${safeSrc}" style="width:100%;height:100%;object-fit:${fitCss};display:block;${radiusCss}${filterCss}" draggable="false" /></foreignObject></svg>`;
-          node.innerHTML = svgStr;
-          // Diagnostic: log clipped image render info to console so we can
-          // verify in DevTools that the SVG was built correctly
+          const innerImg = document.createElementNS(HTML_NS, 'img');
+          innerImg.setAttribute('src', el.src);
+          innerImg.setAttribute('draggable', 'false');
+          innerImg.style.cssText = `width:100%;height:100%;object-fit:${fitCss};display:block;${el.radius?'border-radius:'+el.radius+'px;':''}${el.filter?'filter:'+el.filter+';':''}`;
+          foreign.appendChild(innerImg);
+          svgEl.appendChild(foreign);
+
+          node.appendChild(svgEl);
+
           console.log('[clip-render]', {
             elementId: el.id,
             elementBounds: { x: el.x, y: el.y, w: el.w, h: el.h },
@@ -2547,7 +2574,7 @@ const App = (function(){
             maskBounds: { x: maskEl2.x, y: maskEl2.y, w: maskEl2.w, h: maskEl2.h },
             maskShape: maskEl2.shape || maskEl2.type,
             offsetXY: { x: offsetX, y: offsetY },
-            svgLength: svgStr.length,
+            innerImgNS: innerImg.namespaceURI,
             srcPreview: (el.src || '').slice(0, 60),
           });
         } else {
