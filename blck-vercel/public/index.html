@@ -2881,49 +2881,32 @@ const App = (function(){
         const maskEl = findMaskElement(ab, el.clippedBy);
         if (maskEl) {
           if (maskEl.type === 'image' && maskEl.src) {
-            // RASTER MASK PATH — use CSS mask-image which is rock-solid and
-            // works in every modern browser. The mask PNG's alpha channel
-            // directly determines visibility.
+            // RASTER MASK PATH — use CSS mask-image, the bulletproof technique.
             //
-            // Position the image element so it covers the MASK's bounding
-            // box, then use the mask PNG as the visibility map. The result:
-            // image is visible only where mask has opaque pixels, at the
-            // mask's position on the artboard.
+            // Keep the wrapper at the IMAGE's real bounds (el.x/y/w/h) so
+            // selection handles, drag, and resize all operate on the source
+            // image bounding box — same UX as Photoshop's clipped layer.
             //
-            // We resize/reposition the wrapper node to match the mask's
-            // bounds, and place the original image content inside, offset
-            // so the user's chosen image content shows in the correct part
-            // of the mask shape.
-            const offsetX = el.x - maskEl.x;
-            const offsetY = el.y - maskEl.y;
-            // Reposition the wrapper to the mask's location & size
-            node.style.left = maskEl.x + 'px';
-            node.style.top = maskEl.y + 'px';
-            node.style.width = maskEl.w + 'px';
-            node.style.height = maskEl.h + 'px';
-            // Apply the PNG as a CSS mask. Cover-fit the mask to its own
-            // bounds (the mask PNG should already be cropped to its content
-            // by rasterize, so this just fills the wrapper).
+            // The mask PNG is positioned WITHIN the wrapper's coord space at
+            // the mask's location relative to the image: (maskEl.x - el.x,
+            // maskEl.y - el.y), at the mask's own size.
+            const maskOffsetX = maskEl.x - el.x;
+            const maskOffsetY = maskEl.y - el.y;
             const maskUrl = `url("${maskEl.src.replace(/"/g, '\\"')}")`;
             node.style.maskImage = maskUrl;
             node.style.webkitMaskImage = maskUrl;
-            node.style.maskSize = '100% 100%';
-            node.style.webkitMaskSize = '100% 100%';
+            node.style.maskPosition = `${maskOffsetX}px ${maskOffsetY}px`;
+            node.style.webkitMaskPosition = `${maskOffsetX}px ${maskOffsetY}px`;
+            node.style.maskSize = `${maskEl.w}px ${maskEl.h}px`;
+            node.style.webkitMaskSize = `${maskEl.w}px ${maskEl.h}px`;
             node.style.maskRepeat = 'no-repeat';
             node.style.webkitMaskRepeat = 'no-repeat';
-            // Position the image within the wrapper so its original content
-            // appears in the correct place relative to the mask
-            img.style.position = 'absolute';
-            img.style.left = offsetX + 'px';
-            img.style.top = offsetY + 'px';
-            img.style.width = el.w + 'px';
-            img.style.height = el.h + 'px';
+            // The <img> fills the wrapper normally — no special positioning.
             console.log('[mask-image]', {
               elementId: el.id, maskId: maskEl.id,
               imageBounds: { x: el.x, y: el.y, w: el.w, h: el.h },
               maskBounds: { x: maskEl.x, y: maskEl.y, w: maskEl.w, h: maskEl.h },
-              offset: { x: offsetX, y: offsetY },
-              maskSrcPreview: maskEl.src.slice(0, 60),
+              maskOffsetInWrapper: { x: maskOffsetX, y: maskOffsetY },
             });
           } else {
             // VECTOR MASK PATH — use clip-path with SVG defs (legacy, still
@@ -4769,7 +4752,20 @@ const App = (function(){
       const id = elNode2.dataset.elId;
       const el = activeArtboard().elements.find(e=>e.id===id);
       if (!el || el.locked) return;
+      // If this is a group, snapshot all children's starting state so we
+      // can scale them proportionally as the group is resized.
+      let childSnapshots = null;
+      if (el.type === 'group') {
+        const ab = activeArtboard();
+        const children = ab.elements.filter(c => c._group === el.id);
+        childSnapshots = children.map(c => ({
+          el: c,
+          startX: c.x, startY: c.y, startW: c.w, startH: c.h,
+          startFontSize: c.fontSize,
+        }));
+      }
       dragState = {mode:'resize', handle:handle.dataset.handle, el, startEl:{...el},
+        childSnapshots,
         startX:e.clientX, startY:e.clientY};
       return;
     }
@@ -4854,7 +4850,7 @@ const App = (function(){
       if (ab.isMaster) syncFromMaster();
       renderWorld();
     } else if (dragState.mode === 'resize') {
-      const {handle, el, startEl} = dragState;
+      const {handle, el, startEl, childSnapshots} = dragState;
       let nx = startEl.x, ny = startEl.y, nw = startEl.w, nh = startEl.h;
       if (handle === 'rotate') {
         const cx = startEl.x + startEl.w/2;
@@ -4878,6 +4874,26 @@ const App = (function(){
         }
         el.x = nx; el.y = ny; el.w = nw; el.h = nh;
         if (el.type === 'text' && handle.length === 2) el.fontSize = startEl.fontSize * (nh/startEl.h);
+        // Scale group children proportionally. Each child's position relative
+        // to the group's old origin is multiplied by the scale factor, and
+        // its size scales by the same factor. Text fontSize scales by the
+        // minimum of x/y scale to keep text readable.
+        if (el.type === 'group' && childSnapshots) {
+          const sx = nw / startEl.w;
+          const sy = nh / startEl.h;
+          for (const snap of childSnapshots) {
+            const c = snap.el;
+            const localX = snap.startX - startEl.x;
+            const localY = snap.startY - startEl.y;
+            c.x = nx + localX * sx;
+            c.y = ny + localY * sy;
+            c.w = snap.startW * sx;
+            c.h = snap.startH * sy;
+            if (c.type === 'text' && snap.startFontSize) {
+              c.fontSize = snap.startFontSize * Math.min(sx, sy);
+            }
+          }
+        }
       }
       const ab = state.artboards.find(a=>a.elements.includes(el));
       if (ab && ab.isMaster) syncFromMaster();
