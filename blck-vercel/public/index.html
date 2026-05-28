@@ -2887,19 +2887,47 @@ const App = (function(){
     if (el.filter) node.style.filter = el.filter;
     if (el.outline) node.style.outline = el.outline;
 
-    // Apply CSS clip-path to the wrapper for NON-image elements (text, shape, path).
-    // Images handle their own clipping via inline SVG below, which is more reliable.
-    // Applying CSS clip-path to the wrapper for clipped images can produce zero
-    // visible area in some browsers, hiding the image entirely.
-    if (el.clippedBy && el.type !== 'image') {
+    // Generalized clipping mask handling. Two paths:
+    //   RASTER mask (mask is type:'image' — usually a rasterized shape) →
+    //     CSS mask-image on the wrapper, using the mask PNG's alpha channel.
+    //     This is the bulletproof path: works for text, shape, image, path,
+    //     line — any element type. The clipped element shows only where
+    //     the mask PNG has opaque pixels.
+    //   VECTOR mask (mask is shape/path/text) → CSS clip-path with SVG defs.
+    //     Less reliable cross-browser; user should rasterize the mask first.
+    let _isRasterMaskClipped = false;  // set when raster mask path applied,
+                                       // used below to skip vector clip on img
+    if (el.clippedBy) {
       const maskEl = findMaskElement(ab, el.clippedBy);
       if (maskEl) {
-        const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
-        ensureGlobalClipPath(clipId, maskEl, el);
-        const clipPathUrl = `url(#${clipId})`;
-        node.style.clipPath = clipPathUrl;
-        node.style.webkitClipPath = clipPathUrl;
-        node.style.overflow = 'hidden';
+        if (maskEl.type === 'image' && maskEl.src) {
+          // RASTER MASK PATH — works for any element type. Wrapper stays at
+          // el's actual bounds so selection handles, drag, and resize all
+          // operate on the source element's bounding box (Photoshop-style
+          // "clipped layer" UX).
+          const maskOffsetX = maskEl.x - el.x;
+          const maskOffsetY = maskEl.y - el.y;
+          const maskUrl = `url("${maskEl.src.replace(/"/g, '\\"')}")`;
+          node.style.maskImage = maskUrl;
+          node.style.webkitMaskImage = maskUrl;
+          node.style.maskPosition = `${maskOffsetX}px ${maskOffsetY}px`;
+          node.style.webkitMaskPosition = `${maskOffsetX}px ${maskOffsetY}px`;
+          node.style.maskSize = `${maskEl.w}px ${maskEl.h}px`;
+          node.style.webkitMaskSize = `${maskEl.w}px ${maskEl.h}px`;
+          node.style.maskRepeat = 'no-repeat';
+          node.style.webkitMaskRepeat = 'no-repeat';
+          _isRasterMaskClipped = true;
+        } else if (el.type !== 'image') {
+          // VECTOR MASK PATH — apply clip-path to wrapper for non-image elements.
+          // For clipped images with vector masks, the image branch will handle
+          // it on the inner <img> tag (older, less reliable code path).
+          const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
+          ensureGlobalClipPath(clipId, maskEl, el);
+          const clipPathUrl = `url(#${clipId})`;
+          node.style.clipPath = clipPathUrl;
+          node.style.webkitClipPath = clipPathUrl;
+          node.style.overflow = 'hidden';
+        }
       }
     }
 
@@ -2959,48 +2987,16 @@ const App = (function(){
         img.style.objectFit = 'fill';
       }
 
-      if (el.clippedBy) {
+      if (el.clippedBy && !_isRasterMaskClipped) {
+        // For images clipped by a VECTOR mask (raster handled at wrapper),
+        // apply clip-path on the inner <img> tag (legacy, may be unreliable).
         const maskEl = findMaskElement(ab, el.clippedBy);
         if (maskEl) {
-          if (maskEl.type === 'image' && maskEl.src) {
-            // RASTER MASK PATH — use CSS mask-image, the bulletproof technique.
-            //
-            // Keep the wrapper at the IMAGE's real bounds (el.x/y/w/h) so
-            // selection handles, drag, and resize all operate on the source
-            // image bounding box — same UX as Photoshop's clipped layer.
-            //
-            // The mask PNG is positioned WITHIN the wrapper's coord space at
-            // the mask's location relative to the image: (maskEl.x - el.x,
-            // maskEl.y - el.y), at the mask's own size.
-            const maskOffsetX = maskEl.x - el.x;
-            const maskOffsetY = maskEl.y - el.y;
-            const maskUrl = `url("${maskEl.src.replace(/"/g, '\\"')}")`;
-            node.style.maskImage = maskUrl;
-            node.style.webkitMaskImage = maskUrl;
-            node.style.maskPosition = `${maskOffsetX}px ${maskOffsetY}px`;
-            node.style.webkitMaskPosition = `${maskOffsetX}px ${maskOffsetY}px`;
-            node.style.maskSize = `${maskEl.w}px ${maskEl.h}px`;
-            node.style.webkitMaskSize = `${maskEl.w}px ${maskEl.h}px`;
-            node.style.maskRepeat = 'no-repeat';
-            node.style.webkitMaskRepeat = 'no-repeat';
-            // The <img> fills the wrapper normally — no special positioning.
-            console.log('[mask-image]', {
-              elementId: el.id, maskId: maskEl.id,
-              imageBounds: { x: el.x, y: el.y, w: el.w, h: el.h },
-              maskBounds: { x: maskEl.x, y: maskEl.y, w: maskEl.w, h: maskEl.h },
-              maskOffsetInWrapper: { x: maskOffsetX, y: maskOffsetY },
-            });
-          } else {
-            // VECTOR MASK PATH — use clip-path with SVG defs (legacy, still
-            // unreliable for some shapes but kept as fallback for non-image
-            // masks). For shape masks, recommend the user rasterize the
-            // shape first to get the mask-image rendering.
-            const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
-            ensureGlobalClipPath(clipId, maskEl, el);
-            const url = `url(#${clipId})`;
-            img.style.clipPath = url;
-            img.style.webkitClipPath = url;
-          }
+          const clipId = 'clip-' + el.id.replace(/[^a-zA-Z0-9_-]/g, '');
+          ensureGlobalClipPath(clipId, maskEl, el);
+          const url = `url(#${clipId})`;
+          img.style.clipPath = url;
+          img.style.webkitClipPath = url;
         }
       }
       node.appendChild(img);
@@ -4653,6 +4649,18 @@ const App = (function(){
     textNode.style.webkitUserSelect = 'text';
     textNode.style.cursor = 'text';
     textNode.style.pointerEvents = 'auto';
+    // If the text is clipped by a mask, temporarily lift the mask while
+    // editing so the user can see all their typing (even outside the mask
+    // bounds). The mask will be reapplied automatically by the next render
+    // after commit.
+    const savedMask = {
+      maskImage: freshNode.style.maskImage,
+      webkitMaskImage: freshNode.style.webkitMaskImage,
+    };
+    if (savedMask.maskImage || savedMask.webkitMaskImage) {
+      freshNode.style.maskImage = 'none';
+      freshNode.style.webkitMaskImage = 'none';
+    }
     // Defer focus until after the current event loop tick so the click
     // doesn't immediately blur it
     setTimeout(() => {
