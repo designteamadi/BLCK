@@ -241,6 +241,22 @@
     color:var(--text-3);letter-spacing:0}
   .tool-btn.active .kbd{color:rgba(10,10,10,0.5)}
   .tool-sep{width:24px;height:1px;background:var(--line);margin:4px 0}
+  /* Tool group (Photoshop-style flyout for related tools) */
+  .tool-group{position:relative;display:flex;flex-direction:column;align-items:center}
+  .tool-group .tool-flyout-arrow{position:absolute;bottom:1px;right:1px;font-size:7px;color:var(--text-3);
+    line-height:1;pointer-events:none}
+  .tool-group .tool-btn:hover .tool-flyout-arrow{color:var(--text)}
+  .tool-group.active .tool-flyout-arrow{color:var(--ink);opacity:0.6}
+  .tool-flyout{position:absolute;left:calc(100% + 6px);top:0;background:var(--ink-2);
+    border:1px solid var(--line);box-shadow:0 8px 24px rgba(0,0,0,0.4);
+    min-width:200px;padding:4px;display:none;z-index:1000}
+  .tool-flyout.open{display:block}
+  .flyout-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;
+    background:transparent;border:none;color:var(--text);font-family:var(--font-mono);
+    font-size:11px;letter-spacing:0.05em;cursor:pointer;text-align:left}
+  .flyout-item:hover{background:var(--ink-3)}
+  .flyout-item .kbd{margin-left:auto;font-size:9px;color:var(--text-3);letter-spacing:0.05em}
+  .flyout-item .ic{width:14px;height:14px;flex-shrink:0;color:var(--text-2)}
 
   /* LEFT PANEL */
   .left-panel{width:280px;background:var(--ink);border-right:1px solid var(--line);
@@ -674,7 +690,7 @@
   <div class="top-rule">
     <div class="brand">
       <span class="blck">BLCK</span>
-      <span class="ver">v3.5 · MASKS+RASTER+GROUP / DESIGN.STUDIO</span>
+      <span class="ver">v3.6 · TOOLBAR+SMARTLAYOUT / DESIGN.STUDIO</span>
     </div>
     <div class="top-spec">
       <button id="auth-status" class="auth-status" data-action="auth">
@@ -816,9 +832,23 @@
       <button class="tool-btn" data-tool="hand" data-tip="Hand / pan"><svg class="ic"><use href="#i-hand"/></svg><span class="kbd">H</span></button>
       <div class="tool-sep"></div>
       <button class="tool-btn" data-tool="text" data-tip="Text"><svg class="ic"><use href="#i-font"/></svg><span class="kbd">T</span></button>
-      <button class="tool-btn" data-tool="rect" data-tip="Rectangle"><svg class="ic"><use href="#i-square"/></svg><span class="kbd">R</span></button>
-      <button class="tool-btn" data-tool="ellipse" data-tip="Ellipse"><svg class="ic"><use href="#i-circle"/></svg><span class="kbd">E</span></button>
-      <button class="tool-btn" data-tool="line" data-tip="Line"><svg class="ic"><use href="#i-grip-lines"/></svg><span class="kbd">L</span></button>
+      <!-- Shape tool: long-press or right-click for flyout of sub-tools.
+           The button itself activates the last-used shape (default Rectangle). -->
+      <div class="tool-group" data-tool-group="shape">
+        <button class="tool-btn tool-group-trigger" data-tool="rect" data-tip="Shape (long-press for options)">
+          <svg class="ic"><use href="#i-square"/></svg>
+          <span class="kbd">R</span>
+          <span class="tool-flyout-arrow">▾</span>
+        </button>
+        <div class="tool-flyout" data-flyout-for="shape">
+          <button class="flyout-item" data-tool="rect"><svg class="ic"><use href="#i-square"/></svg> Rectangle <span class="kbd">R</span></button>
+          <button class="flyout-item" data-tool="ellipse"><svg class="ic"><use href="#i-circle"/></svg> Ellipse <span class="kbd">R</span></button>
+          <button class="flyout-item" data-tool="triangle"><svg class="ic"><use href="#i-shapes"/></svg> Triangle <span class="kbd">R</span></button>
+          <button class="flyout-item" data-tool="diamond"><svg class="ic"><use href="#i-diamond"/></svg> Diamond <span class="kbd">R</span></button>
+          <button class="flyout-item" data-tool="star"><svg class="ic"><use href="#i-star"/></svg> Star <span class="kbd">R</span></button>
+          <button class="flyout-item" data-tool="line"><svg class="ic"><use href="#i-grip-lines"/></svg> Line <span class="kbd">R</span></button>
+        </div>
+      </div>
       <button class="tool-btn" data-tool="pen" data-tip="Pen / path"><svg class="ic"><use href="#i-bezier-curve"/></svg><span class="kbd">P</span></button>
       <div class="tool-sep"></div>
       <button class="tool-btn" data-tool="image" data-tip="Insert image"><svg class="ic"><use href="#i-image"/></svg><span class="kbd">I</span></button>
@@ -2685,13 +2715,35 @@ const App = (function(){
       }
 
       let updated = 0;
+      let omitted = 0;
       for (const sug of json.elements) {
         const el = targetByMaster.get(sug.id);
         if (!el) continue;
+
+        // Omit path: mark element as not-rendered on this artboard. We keep
+        // the data so re-syncing or moving to a less-cramped layout brings
+        // it back. The render path checks _omittedByLayout to skip drawing.
+        if (sug.omit === true) {
+          el._omittedByLayout = true;
+          omitted++;
+          continue;
+        }
+        // If previously omitted but now layouted, restore it
+        if (el._omittedByLayout) delete el._omittedByLayout;
+
         const oldX = el.x, oldY = el.y, oldW = el.w, oldH = el.h;
         el.x = sug.x; el.y = sug.y; el.w = sug.w; el.h = sug.h;
         if (el.type === 'text' && typeof sug.fontSize === 'number') {
           el.fontSize = sug.fontSize;
+        }
+        // Image crop hints: store as _cropHint, applied at render time via
+        // object-fit + object-position math
+        if (el.type === 'image' && typeof sug.cropX === 'number') {
+          el._cropHint = {
+            x: sug.cropX, y: sug.cropY, w: sug.cropW, h: sug.cropH,
+          };
+        } else if (el._cropHint) {
+          delete el._cropHint;
         }
         // If this is a group, move all its children by the same delta and
         // scale them by the same ratio so children stay positioned within
@@ -2826,7 +2878,8 @@ const App = (function(){
     // children, but its own fill/stroke isn't drawn.
     const usedAsMask = isUsedAsMask(ab, el);
     const baseHidden = usedAsMask && el.clipBaseHidden;
-    node.style.display = (el.visible === false || baseHidden) ? 'none' : 'block';
+    const omittedByLayout = el._omittedByLayout;
+    node.style.display = (el.visible === false || baseHidden || omittedByLayout) ? 'none' : 'block';
     node.style.transform = `rotate(${el.rotation||0}deg)`;
     if (el.blendMode && el.blendMode !== 'normal') {
       node.style.mixBlendMode = el.blendMode;
@@ -2866,6 +2919,50 @@ const App = (function(){
       if (el.underline) t.style.textDecoration = 'underline';
       t.textContent = el.text || 'Text';
       node.appendChild(t);
+      // Double-click to edit text in place
+      node.addEventListener('dblclick', (e) => {
+        if (el.locked) return;
+        e.stopPropagation();
+        e.preventDefault();
+        t.contentEditable = 'true';
+        t.focus();
+        // Place caret at end of text
+        const range = document.createRange();
+        range.selectNodeContents(t);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        // On blur, commit the change
+        const commit = () => {
+          t.contentEditable = 'false';
+          const newText = t.textContent || '';
+          if (newText !== el.text) {
+            el.text = newText;
+            if (!el.name || el.name === defaultName({...el, text: el.text})) {
+              el.name = defaultName(el);
+            }
+            const ab = state.artboards.find(a => a.elements.includes(el));
+            if (ab && ab.isMaster) syncFromMaster();
+            pushHistory();
+            renderProperties();
+            renderLayers();
+          }
+        };
+        t.addEventListener('blur', commit, { once: true });
+        // Enter (without shift) also commits
+        t.addEventListener('keydown', (ke) => {
+          if (ke.key === 'Enter' && !ke.shiftKey) {
+            ke.preventDefault();
+            t.blur();
+          }
+          if (ke.key === 'Escape') {
+            ke.preventDefault();
+            t.textContent = el.text || '';
+            t.blur();
+          }
+        });
+      });
     } else if (el.type === 'image') {
       // Wrap the <img> in an inner div so we can position it precisely
       // (needed when the image is clipped by an image-mask and we want the
@@ -2876,6 +2973,33 @@ const App = (function(){
       if (el.objectFit) img.style.objectFit = el.objectFit;
       if (el.radius) img.style.borderRadius = el.radius + 'px';
       if (el.filter) img.style.filter = el.filter;
+
+      // Apply Smart Layout crop hint: cropX/Y/W/H are 0..1 fractions of the
+      // SOURCE image. We achieve this by sizing the img to be larger than
+      // the wrapper (so the crop region fits the wrapper exactly) and
+      // shifting it via negative margins to align the crop start with the
+      // wrapper's origin.
+      if (el._cropHint && el._cropHint.w > 0 && el._cropHint.h > 0) {
+        const ch = el._cropHint;
+        // The img is scaled so its (cropW × cropH) region equals the wrapper.
+        // Therefore the img's full width = wrapperWidth / cropW.
+        const scaledW = el.w / ch.w;
+        const scaledH = el.h / ch.h;
+        const shiftX = -ch.x * scaledW;
+        const shiftY = -ch.y * scaledH;
+        img.style.position = 'absolute';
+        img.style.width = scaledW + 'px';
+        img.style.height = scaledH + 'px';
+        img.style.left = shiftX + 'px';
+        img.style.top = shiftY + 'px';
+        img.style.maxWidth = 'none';
+        img.style.maxHeight = 'none';
+        // The wrapper needs to clip what overflows
+        node.style.overflow = 'hidden';
+        // object-fit doesn't apply when we explicitly size the img — set to
+        // fill so the img fills its set dimensions
+        img.style.objectFit = 'fill';
+      }
 
       if (el.clippedBy) {
         const maskEl = findMaskElement(ab, el.clippedBy);
@@ -4090,6 +4214,29 @@ const App = (function(){
     addBtn.innerHTML = ic('plus') + ' Add artboard ratio';
     addBtn.onclick = openRatioPicker;
     body.appendChild(addBtn);
+    // Re-layout all button — useful when the user has edited the master and
+    // wants all children to be re-arranged by Smart Layout
+    const childrenCount = state.artboards.filter(a => !a.isMaster).length;
+    if (childrenCount > 0 && getSmartLayout()) {
+      const relayoutBtn = document.createElement('button');
+      relayoutBtn.className = 'btn btn-sm btn-block';
+      relayoutBtn.style.marginTop = '6px';
+      relayoutBtn.innerHTML = ic('arrows-rotate') + ' Re-layout all from master';
+      relayoutBtn.onclick = async () => {
+        const master = state.artboards.find(a => a.isMaster);
+        if (!master) return;
+        // First sync content from master to all children
+        syncFromMaster();
+        // Then run Smart Layout on every non-master artboard
+        for (const ab of state.artboards) {
+          if (ab.isMaster) continue;
+          await runSmartLayoutForArtboard(ab, { announce: false });
+        }
+        toast('Re-layout complete', 'ok', 'LAYOUT');
+        renderAll();
+      };
+      body.appendChild(relayoutBtn);
+    }
   }
 
   function openRatioPicker() {
@@ -4730,7 +4877,7 @@ const App = (function(){
     }
     if (state.tool === 'pen') { handlePenClick(e); return; }
 
-    if (['rect','ellipse','line','text'].includes(state.tool) && !elNode) {
+    if (['rect','ellipse','triangle','diamond','star','line','text'].includes(state.tool) && !elNode) {
       const wp = worldPosFromEvent(e);
       const ab = pickArtboardAt(wp);
       if (!ab) return;
@@ -4741,6 +4888,9 @@ const App = (function(){
       let placeholder;
       if (state.tool === 'rect') placeholder = {type:'shape', shape:'rect', fill:'#FF5949'};
       else if (state.tool === 'ellipse') placeholder = {type:'shape', shape:'circle', fill:'#FF5949'};
+      else if (state.tool === 'triangle') placeholder = {type:'shape', shape:'triangle', fill:'#FF5949'};
+      else if (state.tool === 'diamond') placeholder = {type:'shape', shape:'diamond', fill:'#FF5949'};
+      else if (state.tool === 'star') placeholder = {type:'shape', shape:'star', fill:'#FF5949'};
       else if (state.tool === 'line') placeholder = {type:'line', stroke:'#0A0A0A', strokeWidth:4};
       else if (state.tool === 'text') placeholder = {type:'text', text:'Type something', fontSize:36, fontWeight:500, color:'#0A0A0A', align:'center', font:'Inter'};
       dragState.placeholder = placeholder;
@@ -5068,15 +5218,38 @@ const App = (function(){
   function setTool(tool) {
     state.tool = tool;
     if (tool !== 'pen') resetPen();
+    // For shape sub-tools, update the trigger button's icon to match the
+    // selected shape (Photoshop-style "remember last used").
+    const shapeTools = ['rect','ellipse','triangle','diamond','star','line'];
+    if (shapeTools.includes(tool)) {
+      const trigger = document.querySelector('[data-tool-group="shape"] .tool-group-trigger');
+      if (trigger) {
+        trigger.dataset.tool = tool;
+        const iconMap = {
+          rect:'square', ellipse:'circle', triangle:'shapes',
+          diamond:'diamond', star:'star', line:'grip-lines',
+        };
+        const useEl = trigger.querySelector('use');
+        if (useEl) useEl.setAttribute('href', '#i-' + iconMap[tool]);
+      }
+    }
     updateToolButtons();
+    // Close any open flyouts
+    document.querySelectorAll('.tool-flyout').forEach(f => f.classList.remove('open'));
     const vp = $('#viewport');
     if (tool === 'hand') vp.style.cursor = 'grab';
-    else if (['rect','ellipse','line','text','pen'].includes(tool)) vp.style.cursor = 'crosshair';
+    else if (['rect','ellipse','triangle','diamond','star','line','text','pen'].includes(tool)) vp.style.cursor = 'crosshair';
     else vp.style.cursor = '';
     if (tool === 'image') { $('#file-image').click(); state.tool = 'select'; updateToolButtons(); }
   }
   function updateToolButtons() {
     $$('[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === state.tool));
+    // Also light up the tool-group container when its current sub-tool is active
+    document.querySelectorAll('.tool-group').forEach(g => {
+      const trigger = g.querySelector('.tool-group-trigger');
+      const tool = trigger?.dataset.tool;
+      g.classList.toggle('active', tool === state.tool);
+    });
   }
 
   function setupKeyboard() {
@@ -5143,7 +5316,23 @@ const App = (function(){
           e.preventDefault();
         }
       }
-      const tools = {v:'select',h:'hand',t:'text',r:'rect',e:'ellipse',l:'line',p:'pen',i:'image'};
+      // R cycles through shape sub-tools. V/H/T/P/I remain stable.
+      // Single tap on R = activate last-used shape tool. If pressed while
+      // already on a shape tool, cycle to next.
+      if (e.key === 'r' || e.key === 'R') {
+        const shapeTools = ['rect','ellipse','triangle','diamond','star','line'];
+        const idx = shapeTools.indexOf(state.tool);
+        if (idx >= 0) {
+          // Already on a shape tool — cycle to next
+          setTool(shapeTools[(idx + 1) % shapeTools.length]);
+        } else {
+          // Switch to the trigger's current (last-used) shape, or rect
+          const trigger = document.querySelector('[data-tool-group="shape"] .tool-group-trigger');
+          setTool(trigger?.dataset.tool || 'rect');
+        }
+        return;
+      }
+      const tools = {v:'select',h:'hand',t:'text',p:'pen',i:'image'};
       if (tools[e.key]) setTool(tools[e.key]);
     });
     document.addEventListener('keyup', e => {
@@ -6225,6 +6414,52 @@ const App = (function(){
     $('#btn-export').addEventListener('click', exportAll);
     $('#btn-add-artboard').addEventListener('click', openRatioPicker);
     $$('[data-tool]').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
+    // Tool-group flyout: long-press OR right-click on the trigger opens the
+    // flyout. Clicking a normal item just activates the tool (handled above).
+    $$('.tool-group').forEach(group => {
+      const trigger = group.querySelector('.tool-group-trigger');
+      const flyout = group.querySelector('.tool-flyout');
+      if (!trigger || !flyout) return;
+      let pressTimer = null;
+      let opened = false;
+      const openFlyout = () => {
+        document.querySelectorAll('.tool-flyout.open').forEach(f => { if (f !== flyout) f.classList.remove('open'); });
+        flyout.classList.add('open');
+        opened = true;
+      };
+      trigger.addEventListener('mousedown', (e) => {
+        opened = false;
+        pressTimer = setTimeout(() => { openFlyout(); pressTimer = null; }, 350);
+      });
+      trigger.addEventListener('mouseup', () => {
+        if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      });
+      trigger.addEventListener('mouseleave', () => {
+        if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      });
+      trigger.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        openFlyout();
+      });
+      // Click on the small arrow also opens flyout
+      const arrow = trigger.querySelector('.tool-flyout-arrow');
+      if (arrow) {
+        arrow.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+          openFlyout();
+        });
+      }
+      // Override default click on trigger so it doesn't fire while we're
+      // long-pressing. The setTool will still fire on quick click (handled
+      // by the [data-tool] forEach above).
+    });
+    // Close flyout when clicking outside
+    document.addEventListener('mousedown', (e) => {
+      if (!e.target.closest('.tool-group')) {
+        document.querySelectorAll('.tool-flyout.open').forEach(f => f.classList.remove('open'));
+      }
+    });
     $$('.panel-tab').forEach(t => {
       t.addEventListener('click', () => {
         activeLeftPanel = t.dataset.lpanel;
