@@ -2919,50 +2919,8 @@ const App = (function(){
       if (el.underline) t.style.textDecoration = 'underline';
       t.textContent = el.text || 'Text';
       node.appendChild(t);
-      // Double-click to edit text in place
-      node.addEventListener('dblclick', (e) => {
-        if (el.locked) return;
-        e.stopPropagation();
-        e.preventDefault();
-        t.contentEditable = 'true';
-        t.focus();
-        // Place caret at end of text
-        const range = document.createRange();
-        range.selectNodeContents(t);
-        range.collapse(false);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-        // On blur, commit the change
-        const commit = () => {
-          t.contentEditable = 'false';
-          const newText = t.textContent || '';
-          if (newText !== el.text) {
-            el.text = newText;
-            if (!el.name || el.name === defaultName({...el, text: el.text})) {
-              el.name = defaultName(el);
-            }
-            const ab = state.artboards.find(a => a.elements.includes(el));
-            if (ab && ab.isMaster) syncFromMaster();
-            pushHistory();
-            renderProperties();
-            renderLayers();
-          }
-        };
-        t.addEventListener('blur', commit, { once: true });
-        // Enter (without shift) also commits
-        t.addEventListener('keydown', (ke) => {
-          if (ke.key === 'Enter' && !ke.shiftKey) {
-            ke.preventDefault();
-            t.blur();
-          }
-          if (ke.key === 'Escape') {
-            ke.preventDefault();
-            t.textContent = el.text || '';
-            t.blur();
-          }
-        });
-      });
+      // Text editing on dblclick is handled via event delegation on #world
+      // (see setupCanvasInteraction). That survives renderAll() rebuilds.
     } else if (el.type === 'image') {
       // Wrap the <img> in an inner div so we can position it precisely
       // (needed when the image is clipped by an image-mask and we want the
@@ -4673,6 +4631,75 @@ const App = (function(){
     const viewport = $('#viewport');
     viewport.addEventListener('mousedown', onCanvasDown);
     viewport.addEventListener('wheel', onWheel, {passive:false});
+    // Delegated double-click: text elements become editable in place.
+    // Delegating to the viewport (which persists across renderAll rebuilds)
+    // ensures the handler survives DOM reconstruction.
+    viewport.addEventListener('dblclick', (e) => {
+      const elNode = e.target.closest('.element');
+      if (!elNode) return;
+      const id = elNode.dataset.elId;
+      const abId = elNode.dataset.abId;
+      const ab = state.artboards.find(a => a.id === abId);
+      const el = ab?.elements.find(x => x.id === id);
+      if (!el || el.type !== 'text' || el.locked) return;
+      e.stopPropagation();
+      e.preventDefault();
+      // Find the inner .element-text node in the current DOM and enable editing
+      const textNode = elNode.querySelector('.element-text');
+      if (!textNode) return;
+      textNode.contentEditable = 'true';
+      textNode.style.userSelect = 'text';
+      textNode.style.cursor = 'text';
+      textNode.focus();
+      // Select all text content so user can immediately type to replace
+      const range = document.createRange();
+      range.selectNodeContents(textNode);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      // Commit on blur, Enter, or Escape
+      let editing = true;
+      const commit = () => {
+        if (!editing) return; editing = false;
+        textNode.contentEditable = 'false';
+        textNode.style.userSelect = '';
+        textNode.style.cursor = '';
+        const newText = (textNode.textContent || '').trim();
+        if (newText !== el.text) {
+          el.text = newText || el.text;
+          if (!el.name || el.name === '' || el.name.startsWith('Text')) {
+            el.name = defaultName(el);
+          }
+          if (ab.isMaster) syncFromMaster();
+          pushHistory();
+        }
+        renderAll();  // re-render so element-text reflects new state cleanly
+      };
+      const cancel = () => {
+        if (!editing) return; editing = false;
+        textNode.contentEditable = 'false';
+        textNode.style.userSelect = '';
+        textNode.style.cursor = '';
+        textNode.textContent = el.text || '';
+      };
+      textNode.addEventListener('blur', commit, { once: true });
+      textNode.addEventListener('keydown', (ke) => {
+        if (ke.key === 'Enter' && !ke.shiftKey) {
+          ke.preventDefault();
+          textNode.blur();
+        } else if (ke.key === 'Escape') {
+          ke.preventDefault();
+          cancel();
+          textNode.blur();
+        }
+        // Stop propagation so canvas keyboard shortcuts don't fire while typing
+        ke.stopPropagation();
+      });
+      // Also prevent mousedown during editing from re-triggering canvas drag
+      textNode.addEventListener('mousedown', (me) => {
+        me.stopPropagation();
+      });
+    });
     viewport.addEventListener('contextmenu', e => {
       e.preventDefault();
       const target = e.target.closest('.element');
